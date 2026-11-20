@@ -674,3 +674,40 @@ SHA256  app/caxa/caxa_helper/caxa_helper.cs
     `sha256:848e13f2bcf95206b09b95a3f4ace72c6cb41e19313a8b41df616788b2ddfbfb`；
   - `README-v1.1.0.md`，
     `sha256:fa9054da32bdc9472ab32793d2eace06aa1ae219ff1ba8c35973a47e753ed145`。
+
+## 2026-11-20 v1.2.0 GPZ 特殊目录与复审整改
+
+用户确认：
+
+- 特殊项目 GPZ 在 CAXA 中没有 `GPZ系列`，既有目录名为 `GPZ钢瓶组`。
+- 希望自动处理历史目录差异，不再要求现场手改。
+- 外部 v1.1.0 上传端复审意见需要逐项处理。
+
+实现：
+
+- `03.GPZ.* → GPZ钢瓶组`；其他系列目录规则不变。
+- 上传清单增加稳定 `batch_id`，选择变化不再创建新任务。
+- 上传成功记录保存内容 SHA-256，同图号内容变化时重新上传。
+- 更新下载期间阻止 CAXA 写入；busy 时下载完成后延迟覆盖重启。
+- 更新替换改为临时文件 + 备份 + 原子替换。
+- 损坏 update state 安全降级。
+- helper 补齐 CreateProduct 目录挂接、LinkSubPart、set_drawing、
+  unlink_part_relation 的部分写入证据。
+- 复审逐项处理记录见 `docs/REVIEW_RESPONSE_20261120.md`。
+
+验证：
+
+- 内置：204 个通过，2 个可选 PDF 依赖测试跳过。
+- 独立验收：19 个通过。
+- 边界验收：9 个通过。
+- 真实 Tk：29 个通过。
+- 工艺专用 Tk：2 个通过。
+- `compileall`、helper x86 编译通过。
+- 上传端 one-file 重建与真实 PyInstaller 父子进程覆盖/重启冒烟通过。
+- 当前产物：
+  - uploader
+    `f01b20a17abc3c4a2eff7e4accbe1a37f32091b881bd11a6cae9499e9fb5cccd`
+  - helper
+    `ceac64b89da36bc79675248af40f1a54fee8b1d5fb3b313c961cb7f51e9cf566`
+  - helper source
+    `701824893594e8d9ef02584fad52b6b0d24db5274c24d17e2a717ab2aa388ba9`

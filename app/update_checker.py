@@ -378,13 +378,19 @@ def apply_update(
     temporary = old.with_name(
         ".%s.update-%s.tmp" % (old.name, os.getpid())
     )
-    moved_old = False
+    replaced = False
     try:
-        if backup is not None:
-            os.replace(old, backup)
-            moved_old = True
         shutil.copy2(source, temporary)
+        with temporary.open("rb+") as handle:
+            os.fsync(handle.fileno())
+        if _sha256_file(temporary) != _sha256_file(source):
+            raise UpdateError("待安装 EXE 校验失败")
+        if backup is not None:
+            shutil.copy2(old, backup)
+            if _sha256_file(backup) != _sha256_file(old):
+                raise UpdateError("旧 EXE 备份校验失败")
         os.replace(temporary, old)
+        replaced = True
         if _sha256_file(old) != _sha256_file(source):
             raise UpdateError("覆盖后的 EXE 校验失败")
         process = popen([str(old)], cwd=str(old.parent))
@@ -393,10 +399,8 @@ def apply_update(
             temporary.unlink()
         except OSError:
             pass
-        if moved_old and backup is not None:
+        if replaced and backup is not None:
             try:
-                if old.exists():
-                    old.unlink()
                 os.replace(backup, old)
             except OSError:
                 pass
@@ -532,7 +536,10 @@ class UpdateStateStore:
         ).isoformat()
 
     def cached_update(self, current_version: str) -> UpdateInfo | None:
-        return UpdateInfo.from_state(current_version, self._state)
+        try:
+            return UpdateInfo.from_state(current_version, self._state)
+        except (TypeError, ValueError, UpdateError):
+            return None
 
     def mark_attempt(
         self,

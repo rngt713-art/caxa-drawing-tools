@@ -6,6 +6,31 @@
 > 跨窗口继续工作前必须先读 `docs/BUSINESS_REQUIREMENTS.md`。用户确认的业务规则和
 > 刻意保留的高层→低层兼容回退不是待优化项。
 
+## 2026-11-20 v1.2.0 GPZ 特殊目录与复审整改
+
+- 当前版本升级为 `v1.2.0`。
+- `03.GPZ.*` 固定映射到 CAXA 既有 ProductFolder `GPZ钢瓶组`，不再生成
+  `GPZ系列`；GPZ 产品显示名中的 `/` 不影响图号识别。
+- 上传清单增加稳定 `batch_id`。勾选变化、追加行和 workflow-only 子集不再
+  创建新任务或重传已确认项。
+- 成功上传 detail 保存 SHA-256；同图号内容变化会重新上传当前内容。
+- 更新下载期间阻止上传/关系/流程写入；下载完成但仍有任务时延迟到 busy
+  解除后覆盖重启。
+- 覆盖更新改为“临时新文件 + 旧备份 + 一次原子替换”，损坏 update state
+  不再阻止启动。
+- helper 补齐 Product 目录挂接、LinkSubPart、set_drawing 和关系删除的
+  部分写入证据。
+- Authenticode 仍未签名，已在
+  `docs/REVIEW_RESPONSE_20261120.md` 明确列为外部证书限制。
+- 验证：204 内置（2 个可选 PDF 依赖跳过）、19 独立、9 边界、29 Tk、
+  2 工艺 Tk；`compileall`、helper x86、上传端 one-file 和真实覆盖重启冒烟
+  通过。
+- 当前上传端：
+  `f01b20a17abc3c4a2eff7e4accbe1a37f32091b881bd11a6cae9499e9fb5cccd`
+- 当前 helper：
+  `ceac64b89da36bc79675248af40f1a54fee8b1d5fb3b313c961cb7f51e9cf566`
+- 下一步：提交、发布 `v1.2.0` Release。
+
 ## 2026-11-20 v1.1.0 每日检查与自动覆盖更新
 
 - 当前版本升级为 `v1.1.0`。

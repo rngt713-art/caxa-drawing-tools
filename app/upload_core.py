@@ -582,16 +582,24 @@ def _item_plan_entry(item: dict) -> dict:
 
 
 def content_digest(manifest: dict, account: dict) -> str:
-    selected = _selected_items(manifest)
+    batch_id = str(manifest.get("batch_id") or "").strip()
     payload = {
         "server": str(account.get("ip") or ""),
         "port": int(account.get("port") or 0),
         "user": str(account.get("user") or ""),
-        "items": sorted(
+    }
+    if batch_id:
+        # A GUI upload list keeps one stable identity while the user adds,
+        # removes, or re-selects rows.  Per-item content changes are detected
+        # against the confirmed upload evidence below.
+        payload["batch_id"] = batch_id
+    else:
+        # Backwards compatibility for callers that do not provide a batch id.
+        selected = _selected_items(manifest)
+        payload["items"] = sorted(
             (_item_plan_entry(item) for item in selected),
             key=lambda entry: (entry["code"], entry["sha256"]),
-        ),
-    }
+        )
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -599,6 +607,24 @@ def content_digest(manifest: dict, account: dict) -> str:
 def plan_digest(manifest: dict, account: dict, **_ignored) -> str:
     """Backwards-compatible name: the batch identity is the content only."""
     return content_digest(manifest, account)
+
+
+def _upload_record_matches_item(record: dict, item: dict) -> bool:
+    """Compare a confirmed upload with the current item content.
+
+    New records include the source SHA-256 in their JSON detail.  Legacy
+    records without a hash remain compatible and are treated as matching.
+    """
+    raw = record.get("detail") or ""
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return True
+    if not isinstance(payload, dict) or not payload.get("sha256"):
+        return True
+    expected = str(item.get("sha256") or "").strip().lower()
+    recorded = str(payload.get("sha256") or "").strip().lower()
+    return bool(expected and recorded and expected == recorded)
 
 
 # ---------------------------------------------------------------------------
@@ -898,6 +924,16 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
             raise PendingVerificationError(str(exc)) from exc
 
         confirmed = journal.confirmed_uploads(task_id)
+        selected_by_code = {
+            drawing_bundle.normalize_code(item.get("code")): item
+            for item in selected
+            if drawing_bundle.normalize_code(item.get("code"))
+        }
+        for code, record in list(confirmed.items()):
+            item = selected_by_code.get(code)
+            if item is not None and not _upload_record_matches_item(record, item):
+                confirmed.pop(code, None)
+                log("图纸 %s 的内容已变化，本任务将重新上传当前版本" % code)
         decisions = journal.relation_decisions(task_id)
         confirmed_relations = journal.confirmed_relations(task_id)
         stored_workflow = journal.workflow(task_id)
@@ -1268,7 +1304,15 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                     class_id=class_id if class_id is not None else "",
                     iterator_no=str(result.get("iterator_no") or ""),
                     class_name=result.get("class_name") or "",
-                    detail=str(result.get("file_name") or ""),
+                    detail=json.dumps(
+                        {
+                            "file_name": str(result.get("file_name") or ""),
+                            "target": str(result.get("target") or ""),
+                            "sha256": str(item.get("sha256") or "").lower(),
+                            "size": item.get("size"),
+                        },
+                        ensure_ascii=False,
+                    ),
                 )
                 upload_results.append(
                     _result_row(

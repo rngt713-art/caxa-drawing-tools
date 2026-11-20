@@ -1,4 +1,4 @@
-# CAXA 图纸上传助手 v1.1.0
+# CAXA 图纸上传助手 v1.2.0
 
 本 Release 只提供编译后的上传端 EXE 和本说明。源码请从 GitHub 仓库 clone：
 
@@ -15,7 +15,7 @@ https://github.com/rngt713-art/caxa-drawing-tools.git
 
 ## 使用
 
-1. 双击 `CAXA-Drawing-Uploader-v1.1.0.exe`。
+1. 双击 `CAXA-Drawing-Uploader-v1.2.0.exe`。
 2. 填写当前使用人的 CAXA 用户名和密码；密码允许为空。
 3. 打开识别端导出的上传包，或直接拖入按 `图号 名称.pdf` 命名的 PDF。
 4. 检查文件名、图纸类型、成品代码和层级关系。
@@ -43,6 +43,12 @@ https://github.com/rngt713-art/caxa-drawing-tools.git
 - 同一图号只能有一个原件。
 - 多个产品/上级挂接合法，但只允许一个 `reference=False` 归属，其他必须是借用。
 
+## GPZ 特殊系列
+
+- `03.GPZ.*` 自动映射到 CAXA 既有目录 `GPZ钢瓶组`。
+- 不再生成或要求手工修改为 `GPZ系列`。
+- GPZ 产品显示名称中的 `/` 属于名称，不影响整机代号识别。
+
 ## 待核实
 
 超时、helper 退出或写入后回读失败时，操作会标记为“待核实”，程序不会自动重放。
@@ -56,5 +62,5 @@ https://github.com/rngt713-art/caxa-drawing-tools.git
 
 ## 版本
 
-- 当前版本：`v1.1.0`
+- 当前版本：`v1.2.0`
 - 正式版本以 Git tag `vX.Y.Z` 和 EXE 文件名为准。

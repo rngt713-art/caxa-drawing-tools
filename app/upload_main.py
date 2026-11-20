@@ -9,7 +9,9 @@ import os
 import queue
 import sys
 import threading
+import time
 import traceback
+import uuid
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -349,8 +351,10 @@ class UploadApp(TkinterDnD.Tk):
         self._series_product_code = ""
         self._series_product_required_codes: set[str] = set()
         self._syncing_series_product = False
+        self._batch_id = ""
         self.update_state = None
         self._available_update = None
+        self._pending_update = None
         self._update_busy = False
         self._update_busy_label = ""
         self._update_after_id = None
@@ -1000,10 +1004,18 @@ class UploadApp(TkinterDnD.Tk):
         except tk.TclError:
             pass
         self._refresh_update_button()
+        if not busy:
+            self._maybe_start_pending_update()
 
     def _blocked_by_busy(self) -> bool:
         if self.busy:
             self.status_var.set("当前任务进行中，暂时不能修改清单或再次提交")
+            return True
+        return False
+
+    def _blocked_by_update(self) -> bool:
+        if self._update_busy or self._pending_update is not None:
+            self.status_var.set("正在下载或安装更新，暂时不能开始 CAXA 写入")
             return True
         return False
 
@@ -1042,6 +1054,20 @@ class UploadApp(TkinterDnD.Tk):
                     700, self._start_daily_update_check
                 )
 
+    def _ensure_batch_id(self) -> str:
+        if self.bundle is None:
+            return ""
+        current = str(self.bundle.get("batch_id") or "").strip()
+        if current:
+            self._batch_id = current
+            return current
+        self._batch_id = "B%s-%s" % (
+            time.strftime("%Y%m%d%H%M%S"),
+            uuid.uuid4().hex[:12],
+        )
+        self.bundle["batch_id"] = self._batch_id
+        return self._batch_id
+
     def _automatic_update_check_enabled(self) -> bool:
         disabled = os.environ.get("CAXA_DISABLE_UPDATE_CHECK", "").strip()
         if disabled.lower() in ("1", "true", "yes", "on"):
@@ -1065,6 +1091,9 @@ class UploadApp(TkinterDnD.Tk):
             return
         if self._update_busy:
             text = self._update_busy_label or "检查中…"
+            state = "disabled"
+        elif self._pending_update is not None:
+            text = "更新待安装"
             state = "disabled"
         elif self.busy:
             text = "检查更新"
@@ -1183,6 +1212,18 @@ class UploadApp(TkinterDnD.Tk):
 
     def _handle_update_downloaded(self, payload):
         info, path = payload
+        if self.busy:
+            self._pending_update = (info, Path(path))
+            self._update_busy = False
+            self._update_busy_label = ""
+            message = (
+                "新版本 v%s 已下载并校验；当前任务完成后再自动覆盖并重启。"
+                % info.latest_version
+            )
+            self.log(message)
+            self.status_var.set(message)
+            self._refresh_update_button()
+            return
         self._update_busy_label = "启动新版…"
         self._refresh_update_button()
         self.log(
@@ -1193,6 +1234,21 @@ class UploadApp(TkinterDnD.Tk):
         threading.Thread(
             target=self._relaunch_update_worker,
             args=(info, Path(path)),
+            daemon=True,
+        ).start()
+
+    def _maybe_start_pending_update(self):
+        if self._pending_update is None or self.busy or self._update_busy:
+            return
+        info, path = self._pending_update
+        self._pending_update = None
+        self._update_busy = True
+        self._update_busy_label = "启动新版…"
+        self._refresh_update_button()
+        self.status_var.set("当前任务已完成，正在启动新版…")
+        threading.Thread(
+            target=self._relaunch_update_worker,
+            args=(info, path),
             daemon=True,
         ).start()
 
@@ -1383,6 +1439,7 @@ class UploadApp(TkinterDnD.Tk):
             else:
                 self.bundle["items"] = self.items
                 self.bundle["relations"] = self.relations
+            self._ensure_batch_id()
             inferred = drawing_bundle.infer_code_relations(
                 self.bundle,
                 child_codes=added_codes,
@@ -1512,6 +1569,7 @@ class UploadApp(TkinterDnD.Tk):
             manifest_path, bundle = drawing_bundle.load_bundle(path)
             self.manifest_path = manifest_path
             self.bundle = bundle
+            self._ensure_batch_id()
             self.items = list(bundle.get("items") or [])
             self.manual_borrows = list(bundle.get("manual_borrows") or [])
             self.relations = drawing_bundle.normalize_manifest_relations(bundle)
@@ -1917,6 +1975,7 @@ class UploadApp(TkinterDnD.Tk):
                 "relations": self.relations,
                 "warnings": [],
             }
+        self._ensure_batch_id()
         self.bundle["relations"] = self.relations
         self._sync_relation_item_fields()
         if refresh:
@@ -3237,6 +3296,7 @@ class UploadApp(TkinterDnD.Tk):
             messagebox.showwarning("提示", "请先打开上传包或添加 PDF")
             return
         self._apply_series_product_name()
+        self._ensure_batch_id()
         snapshot = ui_logic.snapshot_manifest(self.bundle)
         result = preview_bundle(snapshot)
         self.status_var.set(
@@ -3287,6 +3347,9 @@ class UploadApp(TkinterDnD.Tk):
     def start_manual_borrow(self):
         if self._blocked_by_busy():
             return
+        if self._blocked_by_update():
+            return
+        self._ensure_batch_id()
         snapshot = ui_logic.snapshot_manifest(self.bundle)
         batch_codes = set(self._code_name_map())
         existing_only = [
@@ -3367,6 +3430,8 @@ class UploadApp(TkinterDnD.Tk):
         if self.busy:
             self.status_var.set("当前任务仍在进行，请等待完成")
             return
+        if self._blocked_by_update():
+            return
         if not self.bundle:
             messagebox.showwarning("提示", "请先打开包含已上传图纸的上传包")
             return
@@ -3399,6 +3464,7 @@ class UploadApp(TkinterDnD.Tk):
             return
         options = self._workflow_options()
         options["workflow_only"] = True
+        self._ensure_batch_id()
         snapshot = ui_logic.snapshot_manifest(self.bundle)
         self.set_busy(True)
         self.status_var.set("发起流程中…")
@@ -3411,6 +3477,8 @@ class UploadApp(TkinterDnD.Tk):
     def start_upload(self, force_new_task: bool = False):
         if self.busy:
             self.status_var.set("当前任务仍在进行，请等待完成")
+            return
+        if self._blocked_by_update():
             return
         if not self.bundle:
             messagebox.showwarning("提示", "请先打开上传包")
@@ -3439,6 +3507,7 @@ class UploadApp(TkinterDnD.Tk):
                 + "\n".join(required_missing[:20]),
             )
             return
+        self._ensure_batch_id()
         snapshot = ui_logic.snapshot_manifest(self.bundle)
         if force_new_task:
             snapshot["force_new_task"] = True

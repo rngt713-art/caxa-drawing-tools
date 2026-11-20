@@ -1,6 +1,7 @@
 """Persistence semantics: pending/resume/recovery, locks, phase reuse."""
 
 import os
+import json
 import unittest
 
 import _support
@@ -102,6 +103,62 @@ class JournalSemanticsTests(unittest.TestCase):
         unselected["sha256"] = "f" * 64
         after = upload_core.content_digest(manifest, _support.ACCOUNT)
         self.assertEqual(before, after)
+
+    def test_batch_id_keeps_task_identity_when_selection_changes(self):
+        root = os.path.dirname(self.journal_file)
+        first = _support.make_item(root, "01.01", "first")
+        second = _support.make_item(
+            root,
+            "01.02",
+            "second",
+            content=b"%PDF second",
+        )
+        manifest = _support.make_manifest([first, second])
+        manifest["batch_id"] = "B-test-stable"
+        first_only = upload_core.content_digest(manifest, _support.ACCOUNT)
+        second["upload_sel"] = True
+        both = upload_core.content_digest(manifest, _support.ACCOUNT)
+        second["upload_sel"] = False
+        second_again = upload_core.content_digest(
+            manifest, _support.ACCOUNT
+        )
+        self.assertEqual(first_only, both)
+        self.assertEqual(first_only, second_again)
+
+    def test_confirmed_upload_hash_mismatch_requires_reupload(self):
+        item = {"sha256": "a" * 64}
+        matching = {
+            "detail": json.dumps({"sha256": "a" * 64})
+        }
+        changed = {
+            "detail": json.dumps({"sha256": "b" * 64})
+        }
+        legacy = {"detail": "old-file.pdf"}
+        self.assertTrue(upload_core._upload_record_matches_item(matching, item))
+        self.assertFalse(upload_core._upload_record_matches_item(changed, item))
+        self.assertTrue(upload_core._upload_record_matches_item(legacy, item))
+
+    def test_adding_selected_row_reuses_task_and_uploads_only_new_row(self):
+        root = os.path.dirname(self.journal_file)
+        first = _support.make_item(root, "01.01", "first")
+        second = _support.make_item(
+            root,
+            "01.02",
+            "second",
+            content=b"%PDF second",
+        )
+        second["upload_sel"] = False
+        manifest = _support.make_manifest([first, second])
+        manifest["batch_id"] = "B-incremental-upload"
+        first_result, _ = _support.run_upload(manifest, self.journal_file)
+        self.assertTrue(first_result["ok"])
+        self.assertEqual(first_result["uploaded"], 1)
+
+        second["upload_sel"] = True
+        second_result, _ = _support.run_upload(manifest, self.journal_file)
+        self.assertTrue(second_result["ok"])
+        self.assertEqual(second_result["task_id"], first_result["task_id"])
+        self.assertEqual(_support.FakeUploader.instances[-1].uploads, 1)
 
 
 class RecoveryTests(unittest.TestCase):

@@ -129,6 +129,14 @@ class UpdateCheckerTests(unittest.TestCase):
             self.assertIsNotNone(cached)
             self.assertEqual(cached.latest_version, "1.1.0")
 
+    def test_corrupt_cached_version_does_not_break_startup(self):
+        with _support.temp_dir("update_corrupt_") as directory:
+            path = os.path.join(directory, "update_state.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"latest_version": "broken"}, handle)
+            store = update_checker.UpdateStateStore(path)
+            self.assertIsNone(store.cached_update("1.1.0"))
+
     def test_download_verifies_sha256_and_avoids_overwrite(self):
         content = b"verified update bytes"
         digest = hashlib.sha256(content).hexdigest()

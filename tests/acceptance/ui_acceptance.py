@@ -24,6 +24,15 @@ class UIAcceptance(unittest.TestCase):
         a.add_pdfs([str(self.f)]); self.assertEqual(len(a.items),1)
         self.assertTrue(all(str(b.cget('state'))=='disabled' for b in a.action_buttons))
         a.set_busy(False); self.assertTrue(all(str(b.cget('state'))=='normal' for b in a.action_buttons))
+    def test_manual_bundle_keeps_one_batch_id_when_rows_are_added(self):
+        a=self.app
+        a.add_pdfs([str(self.f)])
+        first=a.bundle.get('batch_id')
+        second=Path(self.tmp.name)/'01.02 second.pdf'
+        second.write_bytes(b'PDF-2')
+        a.add_pdfs([str(second)])
+        self.assertTrue(first)
+        self.assertEqual(a.bundle.get('batch_id'),first)
     def test_canonical_delete_then_refresh(self):
         a=self.app; a.add_pdfs([str(self.f)],parent_code='01.99')
         self.assertEqual(len(a.relations),1)
@@ -60,6 +69,23 @@ class UIAcceptance(unittest.TestCase):
         text=str(self.app.update_button.cget('text'))
         self.assertTrue(text=='检查更新' or text.startswith('下载 v'))
         self.assertFalse(self.app._automatic_update_check_enabled())
+    def test_downloaded_update_waits_for_active_upload(self):
+        path=Path(self.tmp.name)/'CAXA-Drawing-Uploader-v1.2.0.exe'
+        path.write_bytes(b'exe')
+        info=ui.update_checker.UpdateInfo(
+            current_version='1.1.0',latest_version='1.2.0',available=True,
+            tag_name='v1.2.0',asset_name=path.name,
+            download_url='https://example.test/app.exe',sha256='a'*64,
+        )
+        self.app.busy=True
+        with patch.object(ui.threading,'Thread') as thread:
+            self.app._handle_update_downloaded((info,path))
+        thread.assert_not_called()
+        self.assertIsNotNone(self.app._pending_update)
+        self.app.busy=False
+        with patch.object(ui.threading,'Thread') as thread:
+            self.app.set_busy(False)
+        thread.assert_called_once()
     def test_existing_original_upgrade_only_cell_toggles(self):
         a=self.app
         path=Path(self.tmp.name)/'01.01-01 child.pdf'; path.write_bytes(b'PDF-C')

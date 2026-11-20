@@ -1320,7 +1320,17 @@ class CaxaHelper
         try { match.Delete(); }
         catch (Exception ex)
         {
-            return Err("part relation delete failed: " + ex.Message);
+            return WriteError(
+                "part relation delete failed: " + ex.Message,
+                "unlink_part_relation:after_delete",
+                new Dictionary<string, object>
+                {
+                    { "parent", parentId },
+                    { "child", childId },
+                    { "relation", linkId }
+                },
+                linkId,
+                ex.ToString());
         }
         finally { _deleteDialogAutoConfirm = false; }
         try { parent.Refresh(); } catch { }
@@ -1328,7 +1338,16 @@ class CaxaHelper
         {
             if (link != null && link.ObjectID == linkId)
             {
-                return Err("part relation still exists after delete");
+                return WriteError(
+                    "part relation still exists after delete",
+                    "unlink_part_relation:verify",
+                    new Dictionary<string, object>
+                    {
+                        { "parent", parentId },
+                        { "child", childId },
+                        { "relation", linkId }
+                    },
+                    linkId);
             }
         }
         return Ok(new Dictionary<string, object>
@@ -2339,7 +2358,23 @@ class CaxaHelper
         bool linked = true;
         if (folder != null)
         {
-            linked = folder.LinkProduct(prod);
+            try
+            {
+                linked = folder.LinkProduct(prod);
+            }
+            catch (Exception ex)
+            {
+                return WriteError(
+                    "product created but product-folder link failed: " + ex.Message,
+                    "create_product:link_folder",
+                    new Dictionary<string, object>
+                    {
+                        { "product", productId },
+                        { "product_folder", folder.ObjectID }
+                    },
+                    productId,
+                    ex.ToString());
+            }
             if (!linked)
             {
                 return WriteError(
@@ -3122,6 +3157,7 @@ class CaxaHelper
         int id = Convert.ToInt32(a["object_id"]);
         string name = a.ContainsKey("name") ? Convert.ToString(a["name"]) : null;
         string drawNo = a.ContainsKey("draw_no") ? Convert.ToString(a["draw_no"]) : null;
+        bool updated = false;
         try
         {
             var engine = CAXA.A5.EAP.CommonLibrary.EAPLibEngine.Instance;
@@ -3143,6 +3179,7 @@ class CaxaHelper
                 catch (Exception ex) { res["draw_no_err"] = ex.Message; }
             }
             obj.Update();
+            updated = true;
             res["class"] = obj.ClassName;
             res["updated"] = true;
             var after = _svc.GetDrawing((short)1002, id);
@@ -3166,6 +3203,15 @@ class CaxaHelper
         }
         catch (Exception ex)
         {
+            if (updated)
+            {
+                return WriteError(
+                    "set drawing failed after update: " + ex.Message,
+                    "set_drawing:after_update",
+                    new Dictionary<string, object> { { "drawing", id } },
+                    id,
+                    ex.ToString());
+            }
             return Err("set drawing error: " + ex.Message);
         }
     }
@@ -3644,9 +3690,20 @@ class CaxaHelper
                         });
                     }
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    // 高层异常：记录后继续走低层后备
+                    // LinkSubPart may already have inserted the relation before
+                    // failing.  Falling back would create a duplicate edge.
+                    return WriteError(
+                        "LinkSubPart failed after a write attempt: " + ex.Message,
+                        "link_part:high_after_write",
+                        new Dictionary<string, object>
+                        {
+                            { "parent", parentId },
+                            { "child", childId }
+                        },
+                        0,
+                        ex.ToString());
                 }
             }
         }

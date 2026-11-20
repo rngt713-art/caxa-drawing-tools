@@ -417,6 +417,31 @@
   `CAXA_DISABLE_UPDATE_CHECK=1` 禁用。源码模式下载后只启动新版，不覆盖
   Python 解释器路径。
 
+## 18. 2026-11-20 GPZ 特殊目录、批次身份与复审整改
+
+- `relations.series_product_folder()` 对 `03.GPZ.*` 返回 `GPZ钢瓶组`；
+  其他系列仍按 `<系列>系列`、HT/HGB 等既有规则处理。
+- `UploadApp` 在打开上传包、手工拖入或创建关系计划时生成稳定 `batch_id`，
+  并随上传包保存。`content_digest()` 优先使用
+  `batch_id + server + port + user`，勾选变化不再改变任务身份；没有
+  `batch_id` 的旧调用继续使用原选中内容摘要。
+- 成功上传记录新增 JSON detail，保存 `file_name/target/sha256/size`。
+  续传时当前 item 的 SHA-256 与确认记录不一致，会从本次 confirmed 集合移除并
+  重新上传；旧的非 JSON detail 继续按兼容记录处理。
+- 更新下载期间 `_blocked_by_update()` 阻止上传、手工借用和单独发起流程。
+  下载完成但 UI 仍 busy 时保存 `_pending_update`，由 `set_busy(False)` 在任务
+  结束后启动覆盖重启。
+- `apply_update()` 改为先复制新 EXE 到同目录临时文件并 fsync、复制旧 EXE
+  到 `.old-时间戳` 备份、校验两者，再 `os.replace(temp, old)` 原子替换。
+- `UpdateStateStore.cached_update()` 对非法版本/损坏缓存返回 `None`，避免
+  UI 初始化被坏状态文件阻断。
+- helper 部分写入保护补充：
+  - `CmdCreateProduct()` 的 ProductFolder 挂接异常返回带 product ID 的
+    `partial/uncertain`；
+  - `CmdLinkPartCore()` 高层 `LinkSubPart()` 抛异常后不再自动走低层，避免重复边；
+  - `CmdSetDrawing()` 写后异常统一返回 `WriteError`；
+  - `CmdUnlinkPartRelation()` 删除异常或删除后仍存在关系时返回关系 ID 证据。
+
 ## 11. 2026-11-13 恢复一致性与性能修复
 
 本节为当前源码；上文的旧测试数量和已编译产物描述属于各历史阶段。

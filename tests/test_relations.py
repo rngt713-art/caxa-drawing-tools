@@ -232,6 +232,10 @@ class TreeDecisionTests(unittest.TestCase):
             relations.series_product_folder("03.HW.015350-46P01"),
             "HW系列",
         )
+        self.assertEqual(
+            relations.series_product_folder("03.GPZ.L34040-T01"),
+            "GPZ钢瓶组",
+        )
 
     def test_same_01_series_is_own_without_textual_prefix(self):
         tree = FakeTree([])
