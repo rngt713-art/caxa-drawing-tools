@@ -23,7 +23,13 @@
   存在、新版成功重启且测试进程已清理。
 - 当前上传端：
   `848e13f2bcf95206b09b95a3f4ace72c6cb41e19313a8b41df616788b2ddfbfb`
-- 下一步：发布 `v1.1.0` GitHub Release。
+- GitHub Release `v1.1.0` 已发布：
+  `https://github.com/rngt713-art/caxa-drawing-tools/releases/tag/v1.1.0`
+- Release 远端提交为 `da10fed7e47b042d9acf90dd6530dc754769d8ce`，内容树与
+  本地发布提交一致。
+- Release 只包含：
+  - `CAXA-Drawing-Uploader-v1.1.0.exe`
+  - `README-v1.1.0.md`
 
 ## 2026-11-20 v1.0.0 版本化与 GitHub 分发
 

@@ -665,3 +665,12 @@ SHA256  app/caxa/caxa_helper/caxa_helper.cs
   - `.old-时间戳` 备份保留旧内容；
   - 原路径成功重新启动新版；
   - 测试结束无残留上传端进程。
+- `v1.1.0` 已发布：
+  `https://github.com/rngt713-art/caxa-drawing-tools/releases/tag/v1.1.0`
+- Release 目标远端提交：
+  `da10fed7e47b042d9acf90dd6530dc754769d8ce`。
+- Release 资产回读：
+  - `CAXA-Drawing-Uploader-v1.1.0.exe`，
+    `sha256:848e13f2bcf95206b09b95a3f4ace72c6cb41e19313a8b41df616788b2ddfbfb`；
+  - `README-v1.1.0.md`，
+    `sha256:fa9054da32bdc9472ab32793d2eace06aa1ae219ff1ba8c35973a47e753ed145`。
