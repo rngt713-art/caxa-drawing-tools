@@ -22,11 +22,13 @@
   部分写入证据。
 - Authenticode 仍未签名，已在
   `docs/REVIEW_RESPONSE_20261120.md` 明确列为外部证书限制。
-- 验证：204 内置（2 个可选 PDF 依赖跳过）、19 独立、9 边界、29 Tk、
+- 验证：205 内置（2 个可选 PDF 依赖跳过）、19 独立、9 边界、29 Tk、
   2 工艺 Tk；`compileall`、helper x86、上传端 one-file 和真实覆盖重启冒烟
   通过。
+- 额外用 `.lnk` 快捷方式启动测试，快捷方式工作目录指向桌面；更新后原目标
+  路径和文件名保持不变，新版成功重新启动。
 - 当前上传端：
-  `f01b20a17abc3c4a2eff7e4accbe1a37f32091b881bd11a6cae9499e9fb5cccd`
+  `933deba87845cd2b89ba427317cf199105631c184e1d4c60f0c9cafc04ba07e0`
 - 当前 helper：
   `ceac64b89da36bc79675248af40f1a54fee8b1d5fb3b313c961cb7f51e9cf566`
 - 下一步：提交、发布 `v1.2.0` Release。

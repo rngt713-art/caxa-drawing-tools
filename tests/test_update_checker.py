@@ -5,6 +5,7 @@ import os
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 import _support  # noqa: F401
 import update_checker
@@ -197,8 +198,8 @@ class UpdateCheckerTests(unittest.TestCase):
             with open(path, "wb") as handle:
                 handle.write(b"exe")
 
-            def popen(args, cwd):
-                calls.append((args, cwd))
+            def popen(args, cwd, env=None):
+                calls.append((args, cwd, env))
                 return Process()
 
             process = update_checker.launch_update(
@@ -226,7 +227,7 @@ class UpdateCheckerTests(unittest.TestCase):
             ):
                 update_checker.launch_update(
                     path,
-                    popen=lambda _args, cwd: Process(),
+                    popen=lambda _args, cwd, env=None: Process(),
                     sleep=lambda _seconds: None,
                 )
 
@@ -247,7 +248,10 @@ class UpdateCheckerTests(unittest.TestCase):
                 source,
                 install_target=target,
                 parent_pid=321,
-                popen=lambda args, cwd: calls.append((args, cwd)) or Process(),
+                popen=lambda args, cwd, env=None: calls.append(
+                    (args, cwd, env)
+                )
+                or Process(),
                 sleep=lambda _seconds: None,
             )
         self.assertEqual(
@@ -276,8 +280,8 @@ class UpdateCheckerTests(unittest.TestCase):
             def wait_exit(pid):
                 events.append(("wait", pid))
 
-            def popen(args, cwd):
-                events.append(("launch", args, cwd))
+            def popen(args, cwd, env=None):
+                events.append(("launch", args, cwd, env))
                 return Process()
 
             process, backup = update_checker.apply_update(
@@ -293,6 +297,23 @@ class UpdateCheckerTests(unittest.TestCase):
         self.assertEqual(events[0], ("wait", 456))
         self.assertEqual(events[1][0], "launch")
         self.assertEqual(events[1][1], [os.path.abspath(old)])
+
+    def test_pyinstaller_environment_is_removed_before_restart(self):
+        with patch.dict(
+            os.environ,
+            {
+                "_PYI_PARENT_PROCESS_LEVEL": "2",
+                "_PYI_APPLICATION_HOME_DIR": r"C:\Temp\_MEI123",
+                "_MEIPASS2": r"C:\Temp\_MEI123",
+                "KEEP_ME": "yes",
+            },
+            clear=False,
+        ):
+            environment = update_checker._clean_pyinstaller_environment()
+        self.assertNotIn("_PYI_PARENT_PROCESS_LEVEL", environment)
+        self.assertNotIn("_PYI_APPLICATION_HOME_DIR", environment)
+        self.assertNotIn("_MEIPASS2", environment)
+        self.assertEqual(environment["KEEP_ME"], "yes")
 
 
 if __name__ == "__main__":

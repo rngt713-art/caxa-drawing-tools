@@ -697,16 +697,18 @@ SHA256  app/caxa/caxa_helper/caxa_helper.cs
 
 验证：
 
-- 内置：204 个通过，2 个可选 PDF 依赖测试跳过。
+- 内置：205 个通过，2 个可选 PDF 依赖测试跳过。
 - 独立验收：19 个通过。
 - 边界验收：9 个通过。
 - 真实 Tk：29 个通过。
 - 工艺专用 Tk：2 个通过。
 - `compileall`、helper x86 编译通过。
 - 上传端 one-file 重建与真实 PyInstaller 父子进程覆盖/重启冒烟通过。
+- `.lnk` 快捷方式冒烟通过：快捷方式目标为安装 EXE，Start in 指向桌面；
+  更新后目标路径和文件名不变，新版重新启动成功。
 - 当前产物：
   - uploader
-    `f01b20a17abc3c4a2eff7e4accbe1a37f32091b881bd11a6cae9499e9fb5cccd`
+    `933deba87845cd2b89ba427317cf199105631c184e1d4c60f0c9cafc04ba07e0`
   - helper
     `ceac64b89da36bc79675248af40f1a54fee8b1d5fb3b313c961cb7f51e9cf566`
   - helper source

@@ -356,6 +356,15 @@ def _unique_backup_path(path: Path) -> Path:
     raise UpdateError("无法为旧版本创建唯一备份名")
 
 
+def _clean_pyinstaller_environment() -> dict[str, str]:
+    """Do not leak one-file extraction state into a restarted EXE."""
+    environment = dict(os.environ)
+    for key in list(environment):
+        if key.startswith("_PYI_") or key.startswith("_MEIPASS"):
+            environment.pop(key, None)
+    return environment
+
+
 def apply_update(
     old_path: str | os.PathLike,
     parent_pid: int,
@@ -393,7 +402,11 @@ def apply_update(
         replaced = True
         if _sha256_file(old) != _sha256_file(source):
             raise UpdateError("覆盖后的 EXE 校验失败")
-        process = popen([str(old)], cwd=str(old.parent))
+        process = popen(
+            [str(old)],
+            cwd=str(old.parent),
+            env=_clean_pyinstaller_environment(),
+        )
     except Exception:
         try:
             temporary.unlink()
@@ -431,7 +444,11 @@ def launch_update(
             ]
         )
     try:
-        process = popen(arguments, cwd=str(executable.parent))
+        process = popen(
+            arguments,
+            cwd=str(executable.parent),
+            env=_clean_pyinstaller_environment(),
+        )
     except OSError as exc:
         raise UpdateError("无法启动更新文件：%s" % exc) from exc
     sleep(startup_wait)

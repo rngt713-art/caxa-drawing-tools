@@ -433,6 +433,8 @@
   结束后启动覆盖重启。
 - `apply_update()` 改为先复制新 EXE 到同目录临时文件并 fsync、复制旧 EXE
   到 `.old-时间戳` 备份、校验两者，再 `os.replace(temp, old)` 原子替换。
+- 更新器启动新版前清理 `_PYI_*` 和 `_MEIPASS*` 环境变量。最终进程仍启动
+  `old` 的原路径，因此桌面/开始菜单快捷方式不会因版本文件名变化而失效。
 - `UpdateStateStore.cached_update()` 对非法版本/损坏缓存返回 `None`，避免
   UI 初始化被坏状态文件阻断。
 - helper 部分写入保护补充：
