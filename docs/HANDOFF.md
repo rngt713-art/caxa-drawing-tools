@@ -6,6 +6,25 @@
 > 跨窗口继续工作前必须先读 `docs/BUSINESS_REQUIREMENTS.md`。用户确认的业务规则和
 > 刻意保留的高层→低层兼容回退不是待优化项。
 
+## 2026-11-20 v1.1.0 每日检查与自动覆盖更新
+
+- 当前版本升级为 `v1.1.0`。
+- 正式 EXE 每天首次启动后台检查 GitHub 最新 Release；当天已检查时不重复联网。
+- 发现新版后按钮显示“下载 vX.Y.Z”，点击一次下载并校验 GitHub SHA-256。
+- 下载的新版 EXE 以 `--apply-update` 模式启动，等待旧 PID 退出后：
+  - 旧 EXE 改名为 `.old-YYYYMMDD-HHMMSS`；
+  - 新版覆盖原 EXE 路径并再次校验；
+  - 启动原路径的新版，更新进程退出。
+- 覆盖或启动失败会恢复旧文件并写
+  `%LOCALAPPDATA%\caxa_upload_journal\update_error.log`。
+- 当前验证：199 内置（2 个可选 PDF 依赖跳过）、19 独立、9 边界、27 Tk、
+  2 工艺 Tk；`compileall` 通过。
+- 上传端已重建，真实更新模式冒烟通过：覆盖后哈希一致、`.old-时间戳` 备份
+  存在、新版成功重启且测试进程已清理。
+- 当前上传端：
+  `848e13f2bcf95206b09b95a3f4ace72c6cb41e19313a8b41df616788b2ddfbfb`
+- 下一步：发布 `v1.1.0` GitHub Release。
+
 ## 2026-11-20 v1.0.0 版本化与 GitHub 分发
 
 - 正式版本改为 `vX.Y.Z`，当前 `v1.0.0`。

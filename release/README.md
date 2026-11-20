@@ -1,4 +1,4 @@
-# CAXA 图纸上传助手 v1.0.0
+# CAXA 图纸上传助手 v1.1.0
 
 本 Release 只提供编译后的上传端 EXE 和本说明。源码请从 GitHub 仓库 clone：
 
@@ -15,7 +15,7 @@ https://github.com/rngt713-art/caxa-drawing-tools.git
 
 ## 使用
 
-1. 双击 `图纸上传助手-v1.0.0.exe`。
+1. 双击 `CAXA-Drawing-Uploader-v1.1.0.exe`。
 2. 填写当前使用人的 CAXA 用户名和密码；密码允许为空。
 3. 打开识别端导出的上传包，或直接拖入按 `图号 名称.pdf` 命名的 PDF。
 4. 检查文件名、图纸类型、成品代码和层级关系。
@@ -26,6 +26,15 @@ https://github.com/rngt713-art/caxa-drawing-tools.git
 
 程序始终上传用户选中的原始内容副本，不会改名或覆盖源 PDF。同一批内容再次
 提交不会重复上传已确认成功的图纸。
+
+## 更新
+
+- 每天第一次启动时，程序在后台检查 GitHub 最新正式 Release。
+- 发现新版后，界面按钮显示“下载 vX.Y.Z”。
+- 点击后下载版本化 EXE，校验 GitHub 提供的 SHA-256；校验通过后等待当前进程
+  退出，直接覆盖当前 EXE 并自动重启新版。
+- 旧 EXE 会在同目录保留为 `.old-时间戳` 备份；新版启动失败时不会把旧文件
+  当作成功更新。
 
 ## 02 半成品层级
 
@@ -47,5 +56,5 @@ https://github.com/rngt713-art/caxa-drawing-tools.git
 
 ## 版本
 
-- 当前版本：`v1.0.0`
+- 当前版本：`v1.1.0`
 - 正式版本以 Git tag `vX.Y.Z` 和 EXE 文件名为准。

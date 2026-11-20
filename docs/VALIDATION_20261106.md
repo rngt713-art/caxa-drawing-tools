@@ -626,3 +626,42 @@ SHA256  app/caxa/caxa_helper/caxa_helper.cs
   - uploader `2694f42005d524d9a6142722574978454bed305b8c04ff3afabb3195fa73e68d`
   - helper `af4ec2ddfcf720fa8c9763b50dc446bed7e285a5f6d3c32add2ac7b0d6dbf182`
   - helper source `9d388e503a8c7b8d1d1a0e8e59842dfa4526a9822bd87802a3d7cf8f1106abfd`
+
+## 2026-11-20 v1.1.0 每日检查与一键覆盖更新
+
+用户要求：
+
+- 上传端增加更新按钮；
+- 每天第一次打开时联网检查 GitHub 最新版本；
+- 发现新版后点击一次即下载版本化 EXE；
+- 不要求现场手工替换文件，下载校验后直接覆盖旧 EXE 并重启。
+
+实现：
+
+- 正式 EXE 每天首次启动后台检查 GitHub `/releases/latest`，结果经 Tk 事件队列
+  回主线程；当天已检查时不重复联网。
+- Release 必须包含 `CAXA-Drawing-Uploader-vX.Y.Z.exe` 和 `sha256:` digest。
+- 下载先写临时文件并校验 SHA-256；失败时不覆盖、不执行。
+- 校验通过后，新版 EXE 以 `--apply-update` 更新模式启动；旧进程退出后，旧
+  EXE 保留为 `.old-时间戳` 备份，新版覆盖原路径并重新启动。
+- 覆盖失败恢复旧文件，写入 `%LOCALAPPDATA%\caxa_upload_journal\update_error.log`
+  并显示错误框。
+- `VERSION`、`app/version.py`、UI 标题和构建名同步升级为 `1.1.0`。
+
+验证：
+
+- 内置：199 个通过，2 个可选 PDF 依赖测试跳过。
+- 独立验收：19 个通过。
+- 边界验收：9 个通过。
+- 真实 Tk：27 个通过。
+- 工艺专用 Tk：2 个通过。
+- `compileall` 通过。
+- 更新专项覆盖：版本比较、Release 资产/digest 选择、缺 digest 阻止、每日状态
+  缓存、下载 SHA-256 校验、哈希错误清理、更新模式参数、等待旧进程退出、覆盖
+  原路径、旧文件备份和重新启动。
+- 上传端 one-file 重建和真实更新模式冒烟通过。冒烟结果为：
+  - 覆盖后的原路径 SHA-256
+    `848e13f2bcf95206b09b95a3f4ace72c6cb41e19313a8b41df616788b2ddfbfb`；
+  - `.old-时间戳` 备份保留旧内容；
+  - 原路径成功重新启动新版；
+  - 测试结束无残留上传端进程。

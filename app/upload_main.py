@@ -11,6 +11,7 @@ import sys
 import threading
 import traceback
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
@@ -35,6 +36,7 @@ from recovery_verifier import (  # noqa: E402
     RecoveryVerifier,
     recovery_evidence_summary,
 )
+import update_checker  # noqa: E402
 from version import __version__  # noqa: E402
 
 
@@ -347,7 +349,13 @@ class UploadApp(TkinterDnD.Tk):
         self._series_product_code = ""
         self._series_product_required_codes: set[str] = set()
         self._syncing_series_product = False
+        self.update_state = None
+        self._available_update = None
+        self._update_busy = False
+        self._update_busy_label = ""
+        self._update_after_id = None
         self._build_ui()
+        self._init_update_state()
         self.drop_target_register(DND_FILES)
         self.dnd_bind("<<Drop>>", self._on_drop)
         self._poll_after_id = self.after(150, self._poll_events)
@@ -476,6 +484,11 @@ class UploadApp(TkinterDnD.Tk):
             button = ttk.Button(buttons, text=text, command=command)
             button.pack(side="left", padx=6)
             self.action_buttons.append(button)
+        self.update_button = ttk.Button(
+            buttons, text="检查更新", command=self.on_update_button
+        )
+        self.update_button.pack(side="left", padx=6)
+        self.action_buttons.append(self.update_button)
         ttk.Label(
             top,
             text="数字图号需“图号 名称.pdf”，单字母工艺（Z03/M03/T03/J03/P03）为“图号.pdf”（不带中文名）",
@@ -599,6 +612,18 @@ class UploadApp(TkinterDnD.Tk):
                     self._append_ui_log(payload)
                 elif kind == "status":
                     self.status_var.set(str(payload))
+                elif kind == "update_checked":
+                    self._handle_update_checked(payload)
+                elif kind == "update_error":
+                    self._handle_update_error(payload)
+                elif kind == "update_downloaded":
+                    self._handle_update_downloaded(payload)
+                elif kind == "update_download_error":
+                    self._handle_update_download_error(payload)
+                elif kind == "update_relaunch_ready":
+                    self._handle_update_relaunch_ready(payload)
+                elif kind == "update_relaunch_error":
+                    self._handle_update_relaunch_error(payload)
                 elif kind == "refresh":
                     self.refresh_tree()
                 elif kind == "precheck_done":
@@ -940,6 +965,12 @@ class UploadApp(TkinterDnD.Tk):
             self._poll_after_id = self.after(150, self._poll_events)
 
     def destroy(self):
+        if self._update_after_id is not None:
+            try:
+                self.after_cancel(self._update_after_id)
+            except Exception:
+                pass
+            self._update_after_id = None
         if self._poll_after_id is not None:
             try:
                 self.after_cancel(self._poll_after_id)
@@ -968,6 +999,8 @@ class UploadApp(TkinterDnD.Tk):
             self.tree.configure(selectmode="none" if busy else "extended")
         except tk.TclError:
             pass
+        self._refresh_update_button()
+
     def _blocked_by_busy(self) -> bool:
         if self.busy:
             self.status_var.set("当前任务进行中，暂时不能修改清单或再次提交")
@@ -998,6 +1031,222 @@ class UploadApp(TkinterDnD.Tk):
         walk(self.top_frame)
         self._config_states_cache = states
         return states
+
+    def _init_update_state(self):
+        self.update_state = update_checker.UpdateStateStore()
+        self._available_update = self.update_state.cached_update(__version__)
+        self._refresh_update_button()
+        if self._automatic_update_check_enabled():
+            if not self.update_state.checked_today():
+                self._update_after_id = self.after(
+                    700, self._start_daily_update_check
+                )
+
+    def _automatic_update_check_enabled(self) -> bool:
+        disabled = os.environ.get("CAXA_DISABLE_UPDATE_CHECK", "").strip()
+        if disabled.lower() in ("1", "true", "yes", "on"):
+            return False
+        forced = os.environ.get("CAXA_ENABLE_UPDATE_CHECK", "").strip()
+        return bool(getattr(sys, "frozen", False)) or forced.lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
+    def _start_daily_update_check(self):
+        self._update_after_id = None
+        if self._available_update is not None:
+            return
+        self._start_update_check(manual=False)
+
+    def _refresh_update_button(self):
+        if not hasattr(self, "update_button"):
+            return
+        if self._update_busy:
+            text = self._update_busy_label or "检查中…"
+            state = "disabled"
+        elif self.busy:
+            text = "检查更新"
+            state = "disabled"
+        elif self._available_update is not None:
+            text = "下载 v%s" % self._available_update.latest_version
+            state = "normal"
+        else:
+            text = "检查更新"
+            state = "normal"
+        try:
+            self.update_button.configure(text=text, state=state)
+        except tk.TclError:
+            pass
+
+    def on_update_button(self):
+        if self.busy:
+            self.status_var.set("当前任务进行中，暂时不能检查或下载更新")
+            return
+        if self._update_busy:
+            return
+        if self._available_update is not None:
+            self._start_update_download()
+            return
+        self._start_update_check(manual=True)
+
+    def _start_update_check(self, *, manual: bool):
+        if self._update_busy or self.busy:
+            return
+        self._update_busy = True
+        self._update_busy_label = "检查中…"
+        self._refresh_update_button()
+        self.status_var.set("正在检查 GitHub 最新版本…")
+        threading.Thread(
+            target=self._check_update_worker,
+            args=(manual,),
+            daemon=True,
+        ).start()
+
+    def _check_update_worker(self, manual: bool):
+        try:
+            info = update_checker.check_for_update(__version__)
+            try:
+                self.update_state.mark_attempt(success=True, info=info)
+            except Exception:
+                pass
+            self.events.put(("update_checked", (info, manual)))
+        except Exception as exc:
+            try:
+                self.update_state.mark_attempt(
+                    success=False,
+                    error="%s: %s" % (type(exc).__name__, exc),
+                )
+            except Exception:
+                pass
+            self.events.put(("update_error", (exc, manual)))
+
+    def _handle_update_checked(self, payload):
+        info, manual = payload
+        self._update_busy = False
+        self._update_busy_label = ""
+        if info.available:
+            self._available_update = info
+            message = (
+                "发现新版本 v%s，点击“下载 v%s”从 GitHub 获取。"
+                % (info.latest_version, info.latest_version)
+            )
+            self.log(message)
+            self.status_var.set(message)
+            if manual:
+                messagebox.showinfo(
+                    "发现新版本",
+                    "%s\n\n当前版本：v%s\n最新版本：v%s"
+                    % (message, __version__, info.latest_version),
+                )
+        else:
+            self._available_update = None
+            message = "当前已是最新版本 v%s" % __version__
+            self.log(message)
+            self.status_var.set(message)
+            if manual:
+                messagebox.showinfo("检查更新", message)
+        self._refresh_update_button()
+
+    def _handle_update_error(self, payload):
+        exc, manual = payload
+        self._update_busy = False
+        self._update_busy_label = ""
+        message = "检查更新失败：%s: %s" % (type(exc).__name__, exc)
+        self.log(message)
+        self.status_var.set("检查更新失败")
+        if manual:
+            messagebox.showwarning("检查更新", message)
+        self._refresh_update_button()
+
+    def _start_update_download(self):
+        if self._update_busy or self.busy or self._available_update is None:
+            return
+        info = self._available_update
+        self._update_busy = True
+        self._update_busy_label = "下载中…"
+        self._refresh_update_button()
+        self.status_var.set("正在从 GitHub 下载 v%s…" % info.latest_version)
+        threading.Thread(
+            target=self._download_update_worker,
+            args=(info,),
+            daemon=True,
+        ).start()
+
+    def _download_update_worker(self, info):
+        try:
+            path = update_checker.download_update(info)
+            self.events.put(("update_downloaded", (info, path)))
+        except Exception as exc:
+            self.events.put(("update_download_error", (info, exc)))
+
+    def _handle_update_downloaded(self, payload):
+        info, path = payload
+        self._update_busy_label = "启动新版…"
+        self._refresh_update_button()
+        self.log(
+            "新版本 v%s 已下载并通过 SHA-256 校验，正在启动新版：%s"
+            % (info.latest_version, path)
+        )
+        self.status_var.set("更新已下载，正在启动新版…")
+        threading.Thread(
+            target=self._relaunch_update_worker,
+            args=(info, Path(path)),
+            daemon=True,
+        ).start()
+
+    def _handle_update_download_error(self, payload):
+        info, exc = payload
+        self._update_busy = False
+        self._update_busy_label = ""
+        self._refresh_update_button()
+        message = "下载 v%s 失败：%s: %s" % (
+            info.latest_version,
+            type(exc).__name__,
+            exc,
+        )
+        self.log(message)
+        self.status_var.set("更新下载失败")
+        messagebox.showerror("更新下载失败", message)
+
+    def _relaunch_update_worker(self, info, path: Path):
+        try:
+            install_target = (
+                Path(sys.executable)
+                if getattr(sys, "frozen", False)
+                else None
+            )
+            update_checker.launch_update(
+                path,
+                install_target=install_target,
+                parent_pid=os.getpid(),
+            )
+        except Exception as exc:
+            self.events.put(("update_relaunch_error", (info, exc)))
+            return
+        self.events.put(("update_relaunch_ready", (info, path)))
+
+    def _handle_update_relaunch_ready(self, payload):
+        _info, path = payload
+        self._update_busy = False
+        self._update_busy_label = ""
+        self.log("新版本已启动，正在关闭当前版本：%s" % path)
+        self.status_var.set("新版本已启动，正在关闭当前版本…")
+        self.after(250, self.destroy)
+
+    def _handle_update_relaunch_error(self, payload):
+        info, exc = payload
+        self._update_busy = False
+        self._update_busy_label = ""
+        self._refresh_update_button()
+        message = "新版本 v%s 已下载，但无法启动：%s" % (
+            info.latest_version,
+            exc,
+        )
+        self.log(message)
+        self.status_var.set("新版启动失败")
+        messagebox.showerror("更新启动失败", message)
 
     def _on_drop(self, event):
         try:
@@ -3498,6 +3747,8 @@ class UploadApp(TkinterDnD.Tk):
 
 
 def main():
+    if "--apply-update" in sys.argv:
+        raise SystemExit(update_checker.run_update_mode(sys.argv))
     app = UploadApp()
     paths = [path for path in sys.argv[1:] if os.path.isfile(path)]
     if paths:

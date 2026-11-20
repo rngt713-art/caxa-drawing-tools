@@ -71,7 +71,7 @@ def make_pdf(path, code, name, machine, parent, bom):
     cell(bx0 + (bx1 - bx0) // 2, by0 + 360, bx1, by0 + 440, label="比例")
     cell(bx0, by0 + 440, bx0 + (bx1 - bx0) // 2, by0 + 520, label="共1张")
     cell(bx0 + (bx1 - bx0) // 2, by0 + 440, bx1, by0 + 520, label="第1张")
-            cell(bx0, by0 + 520, bx1, by0 + 560, label="版本 A  发布  2026-08-15  历史作者", font=f_small)
+    cell(bx0, by0 + 520, bx1, by0 + 560, label="版本 A  发布  2026-08-15  历史作者", font=f_small)
     # 材料明细表（可选）：画在标题栏上方
     if bom:
         b2x0, b2y0, b2x1, b2y1 = bx0, by0 - 40 - 90 * len(bom), bx1, by0 - 40

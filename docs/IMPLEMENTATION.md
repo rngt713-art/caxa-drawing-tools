@@ -390,6 +390,33 @@
 - 当前私有 Git 历史保留作归档；公开仓库使用无父提交的 `v1.0.0` 根提交，
   避免历史文档中的旧姓名被公开。
 
+## 17. 2026-11-20 每日检查与自动覆盖更新
+
+- 新增 `app/update_checker.py`：
+  - 查询 `rngt713-art/caxa-drawing-tools` 的 `/releases/latest`；
+  - 只接受 `vX.Y.Z`，按三段数字比较版本；
+  - 选择 `CAXA-Drawing-Uploader-vX.Y.Z.exe`，要求 GitHub 返回
+    `sha256:` digest；
+  - 下载到临时文件，逐块计算 SHA-256，校验通过后原子改名；
+  - 更新状态写入
+    `%LOCALAPPDATA%\caxa_upload_journal\update_state.json`，记录当天是否已
+    检查以及最近一次 Release 信息。
+- `UploadApp` 在正式打包 EXE 中每天首次启动 700 ms 后后台检查；检查结果经
+  现有事件队列回到 Tk 主线程。检查或下载期间只禁用更新按钮，不冻结上传表单。
+- 发现新版后按钮变为“下载 vX.Y.Z”。下载完成并校验后：
+  1. 启动下载的新版 EXE，参数为
+     `--apply-update <旧 EXE 路径> <旧进程 PID>`；
+  2. 当前窗口关闭；
+  3. 新版更新模式等待旧 PID 退出；
+  4. 旧 EXE 改名为同目录 `.old-YYYYMMDD-HHMMSS` 备份；
+  5. 新版复制到旧路径并校验 SHA-256；
+  6. 启动旧路径的新内容后退出更新模式。
+- 覆盖或重启失败时恢复旧 EXE，并写入
+  `%LOCALAPPDATA%\caxa_upload_journal\update_error.log`；窗口版同时显示错误框。
+- 源码运行不执行自动每日检查；可用 `CAXA_ENABLE_UPDATE_CHECK=1` 强制测试，
+  `CAXA_DISABLE_UPDATE_CHECK=1` 禁用。源码模式下载后只启动新版，不覆盖
+  Python 解释器路径。
+
 ## 11. 2026-11-13 恢复一致性与性能修复
 
 本节为当前源码；上文的旧测试数量和已编译产物描述属于各历史阶段。

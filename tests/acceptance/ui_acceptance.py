@@ -55,6 +55,11 @@ class UIAcceptance(unittest.TestCase):
     def test_workflow_only_button_is_available_in_action_bar(self):
         labels=[str(button.cget('text')) for button in self.app.action_buttons]
         self.assertIn('发起流程',labels)
+    def test_update_button_is_integrated_and_never_auto_downloads(self):
+        self.assertIn(self.app.update_button,self.app.action_buttons)
+        text=str(self.app.update_button.cget('text'))
+        self.assertTrue(text=='检查更新' or text.startswith('下载 v'))
+        self.assertFalse(self.app._automatic_update_check_enabled())
     def test_existing_original_upgrade_only_cell_toggles(self):
         a=self.app
         path=Path(self.tmp.name)/'01.01-01 child.pdf'; path.write_bytes(b'PDF-C')

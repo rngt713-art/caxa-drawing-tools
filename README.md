@@ -1,4 +1,4 @@
-# CAXA 图纸上传助手 v1.0.0
+# CAXA 图纸上传助手 v1.1.0
 
 用于把扫描或可读工程图 PDF 识别、拆页、命名，并上传到 CAXA 协同管理
 2011，可选建立设计树借用关系并发起“审核打印”流程。
@@ -10,14 +10,17 @@
   `https://github.com/rngt713-art/caxa-drawing-tools.git`
 - 版本号以仓库根目录 `VERSION`、Git tag `vX.Y.Z` 和 EXE 文件名共同标识。
   不再用“某日期修改版”命名正式版本。
-- 当前版本：`v1.0.0`。
+- 当前版本：`v1.1.0`。
 
 ## 当前状态
 
 - Windows 客户端，Python/Tk 上传界面，C# x86 helper 调用 CAXA EAP 2011r3。
 - 上传端可独立运行，不依赖 Qwen、Pillow、pypdf 或识别模块。
 - 识别端可调用本机 Qwen 视觉服务，人工核对后导出上传包。
-- `release/图纸上传助手-v1.0.0.exe` 是当前正式上传端，内置同版本 helper。
+- `release/图纸上传助手-v1.1.0.exe` 是当前正式上传端，内置同版本 helper。
+- 正式 EXE 每天首次启动会在后台检查 GitHub 最新 Release。发现新版后按钮变为
+  “下载 vX.Y.Z”；点击后下载版本化 EXE、校验 GitHub SHA-256，并直接覆盖当前
+  EXE，随后重启到新版。
 - 2026-11-17 离线回归：160 个单元测试、19 个独立验收、9 个边界验收、
   24 个 Tk 界面测试、2 个仅工艺文档 Tk 测试全部通过，共 214 项。
 - 预检会识别 CAXA 中已有的原件 Part；归属计划自动改为借用，并提供
@@ -51,7 +54,7 @@ pack_source.ps1      源码交付包脚本
 [本轮修复说明](docs/FIXES_AND_PERFORMANCE_20261113.md)。
 
 1. 在工作机安装兼容的 CAXA 协同管理 2011 客户端。
-2. 运行 `release/图纸上传助手-v1.0.0.exe`。
+2. 运行 `release/图纸上传助手-v1.1.0.exe`。
 3. 导入识别助手生成的上传包，或拖入按 `图号 名称.pdf` 命名的 PDF。
    导入时会按图号的直接上级前缀自动建立组件层级，例如
    `...-01-03-01` 自动挂到本批已有的 `...-01-03`。
@@ -97,7 +100,7 @@ powershell -ExecutionPolicy Bypass -File .\build_all.ps1 -All
 powershell -ExecutionPolicy Bypass -File .\build_all.ps1 -Uploader
 ```
 
-上传端构建名从 `VERSION` 读取，例如 `图纸上传助手-v1.0.0.exe`。发布新版本时
+上传端构建名从 `VERSION` 读取，例如 `图纸上传助手-v1.1.0.exe`。发布新版本时
 先更新 `VERSION` 和 `app/version.py`，再提交、打 tag、构建并上传 Release。
 
 helper 必须由安装了 CAXA 2011r3 引用 DLL 的工作机从
