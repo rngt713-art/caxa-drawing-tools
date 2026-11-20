@@ -31,7 +31,13 @@
   `933deba87845cd2b89ba427317cf199105631c184e1d4c60f0c9cafc04ba07e0`
 - 当前 helper：
   `ceac64b89da36bc79675248af40f1a54fee8b1d5fb3b313c961cb7f51e9cf566`
-- 下一步：提交、发布 `v1.2.0` Release。
+- `v1.2.0` 已发布：
+  `https://github.com/rngt713-art/caxa-drawing-tools/releases/tag/v1.2.0`
+- Release 目标远端提交：
+  `8beac820f12c2c3e297cb581d8c7c75bd70b37ab`。
+- Release 资产：
+  - `CAXA-Drawing-Uploader-v1.2.0.exe`
+  - `README-v1.2.0.md`
 
 ## 2026-11-20 v1.1.0 每日检查与自动覆盖更新
 
