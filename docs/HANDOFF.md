@@ -37,6 +37,10 @@
     `67b3d2ff1f227f4dd8ac8f706b0830ffc7b11a6b61a6bda461284eb97ec08664`
   - helper source
     `fcf3f1df5e98372558d1249d422e86296e57010b402dc8513eb72ff8dbe810e7`
+- `v1.2.1` 已发布：
+  `https://github.com/rngt713-art/caxa-drawing-tools/releases/tag/v1.2.1`
+- Release 目标远端提交：
+  `6e9329a4612e109478e71f0548d3293cb5727929`。
 
 ## 2026-11-20 v1.2.0 GPZ 特殊目录与复审整改
 

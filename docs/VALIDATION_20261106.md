@@ -739,3 +739,12 @@ SHA256  app/caxa/caxa_helper/caxa_helper.cs
     `b5bd992bac6e2099ac15b1a0e8c256b65336b1f5370a3d04a081d6d237d24738`
   - helper
     `67b3d2ff1f227f4dd8ac8f706b0830ffc7b11a6b61a6bda461284eb97ec08664`
+- `v1.2.1` 已发布：
+  `https://github.com/rngt713-art/caxa-drawing-tools/releases/tag/v1.2.1`
+- Release 目标远端提交：
+  `6e9329a4612e109478e71f0548d3293cb5727929`。
+- Release 资产回读：
+  - `CAXA-Drawing-Uploader-v1.2.1.exe`，
+    `sha256:b5bd992bac6e2099ac15b1a0e8c256b65336b1f5370a3d04a081d6d237d24738`；
+  - `README-v1.2.1.md`，
+    `sha256:658ef7fa540962d836b66957c8d6432cd7fdda02e8c47cce99dfd20d62030704`。
