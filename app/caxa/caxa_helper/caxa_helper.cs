@@ -3586,6 +3586,25 @@ class CaxaHelper
         }
     }
 
+    static IEAPPart2PartEntity FindPart2PartChild(
+        IEAPPartEntity parent,
+        int childId)
+    {
+        if (parent == null) return null;
+        try { parent.Refresh(); } catch { }
+        foreach (var link in parent.Children(null) ??
+                 new IEAPPart2PartEntity[0])
+        {
+            if (link != null &&
+                link.RefSubPart != null &&
+                link.RefSubPart.ObjectID == childId)
+            {
+                return link;
+            }
+        }
+        return null;
+    }
+
     static Dictionary<string, object> CmdLinkPartCore(Dictionary<string, object> a)
     {
         if (_svc == null || !_svc.HasLogin) return Err("not logged in");
@@ -3665,6 +3684,18 @@ class CaxaHelper
         IEAPPartEntity parent = _svc.GetPart(parentId);
         IEAPPartEntity child = _svc.GetPart(childId);
         if (parent == null || child == null) return Err("part not found");
+        IEAPPart2PartEntity existingPartLink =
+            FindPart2PartChild(parent, childId);
+        if (existingPartLink != null)
+        {
+            return Ok(new Dictionary<string, object>
+            {
+                { "link", "part_part_existing" },
+                { "link_id", existingPartLink.ObjectID },
+                { "reference", existingPartLink.Reference },
+                { "existing", true }
+            });
+        }
         // A borrow relation may legitimately exist for the same child under
         // several parents.  Use the object-store link insert directly so the
         // high-level LinkSubPart implementation cannot reuse or move the
@@ -3692,18 +3723,22 @@ class CaxaHelper
                 }
                 catch (Exception ex)
                 {
-                    // LinkSubPart may already have inserted the relation before
-                    // failing.  Falling back would create a duplicate edge.
-                    return WriteError(
-                        "LinkSubPart failed after a write attempt: " + ex.Message,
-                        "link_part:high_after_write",
-                        new Dictionary<string, object>
+                    // LinkSubPart may have inserted the relation before the
+                    // exception.  Re-read first; only a confirmed absence is
+                    // safe to hand to the low-level fallback.
+                    IEAPPart2PartEntity afterException =
+                        FindPart2PartChild(parent, childId);
+                    if (afterException != null)
+                    {
+                        return Ok(new Dictionary<string, object>
                         {
-                            { "parent", parentId },
-                            { "child", childId }
-                        },
-                        0,
-                        ex.ToString());
+                            { "link", "part_part_after_exception" },
+                            { "link_id", afterException.ObjectID },
+                            { "reference", afterException.Reference },
+                            { "recovered_after_exception", true },
+                            { "high_error", ex.Message }
+                        });
+                    }
                 }
             }
         }

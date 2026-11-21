@@ -37,6 +37,10 @@
 - `CmdLinkPartCore()` 高层写入异常后不再自动执行低层重复建链。
 - `CmdSetDrawing()` 和 `CmdUnlinkPartRelation()` 使用结构化写后证据。
 
+后续现场证明“完全不回退”过于严格：部分 CAXA 客户端在高层 `LinkSubPart`
+尚未写入时也会抛空引用。v1.2.1 已改为异常后先回读关系，确认不存在才走低层
+回退；详见 `INCIDENT_20261121_LINKSUBPART.md`。
+
 ### P3 损坏更新状态
 
 - 非法缓存版本视为“没有缓存更新”，不会阻止上传端启动。

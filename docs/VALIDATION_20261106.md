@@ -722,3 +722,20 @@ SHA256  app/caxa/caxa_helper/caxa_helper.cs
     `sha256:933deba87845cd2b89ba427317cf199105631c184e1d4c60f0c9cafc04ba07e0`；
   - `README-v1.2.0.md`，
     `sha256:67bd8428fd65ce0a3258dbb6fd9ce123fbd3a842b36f08107249b939e5191f8e`。
+
+## 2026-11-21 v1.2.1 LinkSubPart 空引用热修复
+
+- 同事任务 `T20261120165755-023a73` 的 11 个新组件在
+  `upload:link_new_part` 阶段失败，错误为高层 `LinkSubPart` 空引用。
+- 13 个 PDF 与 journal 对应；03/Z03 上传成功，11 个 Part 已创建但 Drawing
+  未上传。详细证据见 `docs/INCIDENT_20261121_LINKSUBPART.md`。
+- 根因是 v1.2.0 在高层异常后完全停止低层回退。
+- v1.2.1 改为高层调用前后回读父件子关系，确认不存在才执行低层
+  `NewOneLevelLink(1037, ...)`。
+- 验证：205 内置（2 个可选 PDF 依赖跳过）、19 独立、9 边界、29 Tk；
+  `compileall`、helper x86 和上传端 one-file 构建通过。
+- 当前产物：
+  - uploader
+    `b5bd992bac6e2099ac15b1a0e8c256b65336b1f5370a3d04a081d6d237d24738`
+  - helper
+    `67b3d2ff1f227f4dd8ac8f706b0830ffc7b11a6b61a6bda461284eb97ec08664`

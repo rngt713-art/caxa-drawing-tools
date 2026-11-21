@@ -18,6 +18,26 @@
 - 下一版构建、Release 资产命名、更新器资产选择、README 示例和回归测试一起改，
   避免只改本地文件名导致自动更新找不到资产。
 
+## 2026-11-21 v1.2.1 LinkSubPart 回归热修复
+
+- 同事任务 `T20261120165755-023a73` 的 11 个新组件在
+  `upload:link_new_part` 阶段失败。
+- 根因是 v1.2.0 在高层 `LinkSubPart` 抛异常后直接停止，未再安全回退；
+  该 CAXA 客户端在未写入时也会抛空引用。
+- v1.2.1 改为异常后先回读父件子关系，确认不存在才走低层建链。
+- 13 个 PDF 与 journal 对应，03/Z03 已成功；11 个 Part 已创建但 Drawing
+  未上传。详细 ID 与现场处理注意见
+  `docs/INCIDENT_20261121_LINKSUBPART.md`。
+- 验证：205 内置（2 个可选 PDF 依赖跳过）、19 独立、9 边界、29 Tk；
+  `compileall`、helper x86、上传端 one-file 构建通过。
+- 当前产物：
+  - uploader
+    `b5bd992bac6e2099ac15b1a0e8c256b65336b1f5370a3d04a081d6d237d24738`
+  - helper
+    `67b3d2ff1f227f4dd8ac8f706b0830ffc7b11a6b61a6bda461284eb97ec08664`
+  - helper source
+    `fcf3f1df5e98372558d1249d422e86296e57010b402dc8513eb72ff8dbe810e7`
+
 ## 2026-11-20 v1.2.0 GPZ 特殊目录与复审整改
 
 - 当前版本升级为 `v1.2.0`。

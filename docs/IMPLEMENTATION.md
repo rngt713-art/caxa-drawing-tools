@@ -444,6 +444,17 @@
   - `CmdSetDrawing()` 写后异常统一返回 `WriteError`；
   - `CmdUnlinkPartRelation()` 删除异常或删除后仍存在关系时返回关系 ID 证据。
 
+## 19. 2026-11-21 LinkSubPart 安全回读与低层回退
+
+- 新增 `FindPart2PartChild(parent, childId)`：刷新父 Part 并读取直接子关系。
+- `CmdLinkPartCore()`：
+  - 高层调用前已有同子件关系时直接返回现有关系；
+  - `LinkSubPart()` 抛异常后先回读；
+  - 回读已存在则返回现有 link ID；
+  - 回读确认不存在时才执行低层 `NewOneLevelLink(1037, ...)`；
+  - 回读异常仍由低层结果/上层最终验证决定，不盲目确认成功。
+- 事件与已创建 Part ID 清单见 `docs/INCIDENT_20261121_LINKSUBPART.md`。
+
 ## 11. 2026-11-13 恢复一致性与性能修复
 
 本节为当前源码；上文的旧测试数量和已编译产物描述属于各历史阶段。
