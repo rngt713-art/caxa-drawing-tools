@@ -69,6 +69,33 @@ class UpdateCheckerTests(unittest.TestCase):
         )
         self.assertEqual(info.sha256, digest)
 
+    def test_check_for_update_prefers_stable_chinese_asset(self):
+        digest = "a" * 64
+        payload = {
+            "tag_name": "v1.2.2",
+            "assets": [
+                {
+                    "name": "CAXA-Drawing-Uploader-v1.2.2.exe",
+                    "browser_download_url": "https://example.test/legacy.exe",
+                    "digest": "sha256:" + "b" * 64,
+                },
+                {
+                    "name": "图纸上传助手.exe",
+                    "browser_download_url": "https://example.test/stable.exe",
+                    "digest": "sha256:" + digest,
+                },
+            ],
+        }
+        info = update_checker.check_for_update(
+            "1.2.1",
+            opener=lambda _request, timeout: BytesResponse(
+                json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            ),
+            token="",
+        )
+        self.assertEqual(info.asset_name, "图纸上传助手.exe")
+        self.assertEqual(info.sha256, digest)
+
     def test_current_release_does_not_require_download_asset(self):
         payload = {"tag_name": "v1.0.0", "assets": []}
         info = update_checker.check_for_update(
@@ -146,7 +173,7 @@ class UpdateCheckerTests(unittest.TestCase):
             latest_version="1.1.0",
             available=True,
             tag_name="v1.1.0",
-            asset_name="CAXA-Drawing-Uploader-v1.1.0.exe",
+            asset_name="图纸上传助手.exe",
             download_url="https://example.test/app.exe",
             sha256=digest,
         )

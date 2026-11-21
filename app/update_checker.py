@@ -26,8 +26,12 @@ LATEST_RELEASE_API = (
 )
 RELEASES_URL = "https://github.com/%s/releases" % REPOSITORY
 VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
-ASSET_PATTERN = re.compile(
+LEGACY_ASSET_PATTERN = re.compile(
     r"^CAXA-Drawing-Uploader-v(\d+\.\d+\.\d+)\.exe$", re.IGNORECASE
+)
+STABLE_ASSET_NAMES = (
+    "图纸上传助手.exe",
+    "CAXA-Drawing-Uploader.exe",
 )
 SHA256_PATTERN = re.compile(r"^sha256:([0-9a-fA-F]{64})$")
 
@@ -106,12 +110,18 @@ def _default_token() -> str:
 def _select_release_asset(
     assets: list[Mapping], latest_version: str
 ) -> Mapping | None:
+    stable_names = {name.lower() for name in STABLE_ASSET_NAMES}
+    for asset in assets:
+        if str(asset.get("name") or "").lower() in stable_names:
+            return asset
     exact_name = "CAXA-Drawing-Uploader-v%s.exe" % latest_version
     for asset in assets:
         if str(asset.get("name") or "").lower() == exact_name.lower():
             return asset
     for asset in assets:
-        match = ASSET_PATTERN.fullmatch(str(asset.get("name") or ""))
+        match = LEGACY_ASSET_PATTERN.fullmatch(
+            str(asset.get("name") or "")
+        )
         if match and match.group(1) == latest_version:
             return asset
     return None
@@ -156,8 +166,8 @@ def check_for_update(
 
     if available and not asset:
         raise UpdateError(
-            "Release v%s 缺少 CAXA-Drawing-Uploader-v%s.exe"
-            % (latest_version, latest_version)
+            "Release v%s 缺少稳定资产 %s"
+            % (latest_version, STABLE_ASSET_NAMES[0])
         )
     if available and not sha256:
         raise UpdateError(
@@ -232,7 +242,12 @@ def download_update(
         raise UpdateError("当前版本已是最新，无需下载")
     if not info.download_url or not info.sha256:
         raise UpdateError("更新信息不完整，已阻止下载")
-    if not ASSET_PATTERN.fullmatch(info.asset_name):
+    safe_name = (
+        info.asset_name.lower()
+        in {name.lower() for name in STABLE_ASSET_NAMES}
+        or bool(LEGACY_ASSET_PATTERN.fullmatch(info.asset_name))
+    )
+    if not safe_name:
         raise UpdateError("更新文件名不安全：%s" % info.asset_name)
 
     directory = (

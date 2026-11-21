@@ -1,4 +1,4 @@
-# CAXA 图纸上传助手 v1.2.1
+# CAXA 图纸上传助手 v1.2.2
 
 本 Release 只提供编译后的上传端 EXE 和本说明。源码请从 GitHub 仓库 clone：
 
@@ -15,7 +15,7 @@ https://github.com/rngt713-art/caxa-drawing-tools.git
 
 ## 使用
 
-1. 双击 `CAXA-Drawing-Uploader-v1.2.1.exe`。
+1. 双击 `图纸上传助手.exe`。
 2. 填写当前使用人的 CAXA 用户名和密码；密码允许为空。
 3. 打开识别端导出的上传包，或直接拖入按 `图号 名称.pdf` 命名的 PDF。
 4. 检查文件名、图纸类型、成品代码和层级关系。
@@ -50,6 +50,16 @@ https://github.com/rngt713-art/caxa-drawing-tools.git
 - 不再生成或要求手工修改为 `GPZ系列`。
 - GPZ 产品显示名称中的 `/` 属于名称，不影响整机代号识别。
 
+## 外部 Agent 接入边界
+
+- 本程序只负责上传，不负责 PDF 识别、拆页或 OCR。
+- 自动确认 CAXA 导入框和重复对象框依赖 helper PID、当前 login/upload 命令和
+  精确目标文件。外部 Agent 直接启动 helper 或从其他进程模拟点击时不会生效。
+- 外部 Agent 不得绕过该限制点击无关窗口、重放部分写入或自行修改 CAXA 数据。
+  遇到“待核实”应停止并交用户核实。
+- 推荐流程：外部工具完成拆分并生成规范 PDF/上传包，用户通过本程序界面预检和
+  上传。无法满足这些边界时，应停止并请求人工处理。
+
 ## 待核实
 
 超时、helper 退出或写入后回读失败时，操作会标记为“待核实”，程序不会自动重放。
@@ -63,5 +73,6 @@ https://github.com/rngt713-art/caxa-drawing-tools.git
 
 ## 版本
 
-- 当前版本：`v1.2.1`
-- 正式版本以 Git tag `vX.Y.Z` 和 EXE 文件名为准。
+- 当前版本：`v1.2.2`
+- 正式版本以 Git tag `vX.Y.Z` 和界面标题为准；安装文件名固定为
+  `图纸上传助手.exe`。

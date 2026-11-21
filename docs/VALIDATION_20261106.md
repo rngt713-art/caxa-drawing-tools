@@ -748,3 +748,18 @@ SHA256  app/caxa/caxa_helper/caxa_helper.cs
     `sha256:b5bd992bac6e2099ac15b1a0e8c256b65336b1f5370a3d04a081d6d237d24738`；
   - `README-v1.2.1.md`，
     `sha256:658ef7fa540962d836b66957c8d6432cd7fdda02e8c47cce99dfd20d62030704`。
+
+## 2026-11-21 v1.2.2 稳定文件名与外部 Agent 边界
+
+- 本地构建/安装 EXE 固定为 `图纸上传助手.exe`，版本号只保留在内部版本、
+  UI 标题和 Git tag。
+- 更新器优先选择稳定资产 `图纸上传助手.exe`，兼容
+  `CAXA-Drawing-Uploader-vX.Y.Z.exe` 过渡资产。
+- v1.2.2 过渡 Release 同时提供稳定 EXE 和同内容版本化别名，保证 v1.2.1
+  客户端仍能自动升级。
+- README 明确：上传端不负责拆分/OCR；外部 Agent 直接驱动 helper 时，自动
+  确认不会生效，不得绕过 PID/命令作用域或重放待核实写入。
+- 验证：207 内置（2 个可选 PDF 依赖测试跳过）；`compileall` 和稳定名
+  one-file 构建通过。
+- 当前 uploader：
+  `d3033971a871163e6c5f37dc29dd7e0127472b04314ca3326d772972131227ff`

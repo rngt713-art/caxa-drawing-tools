@@ -1,4 +1,4 @@
-# CAXA 图纸上传助手 v1.2.1
+# CAXA 图纸上传助手 v1.2.2
 
 用于把扫描或可读工程图 PDF 识别、拆页、命名，并上传到 CAXA 协同管理
 2011，可选建立设计树借用关系并发起“审核打印”流程。
@@ -8,16 +8,16 @@
 - GitHub Releases 只分发编译后的上传端 EXE 和对应版本的 README。
 - 源码统一从公开仓库 clone：
   `https://github.com/rngt713-art/caxa-drawing-tools.git`
-- 版本号以仓库根目录 `VERSION`、Git tag `vX.Y.Z` 和 EXE 文件名共同标识。
-  不再用“某日期修改版”命名正式版本。
-- 当前版本：`v1.2.1`。
+- 版本号以仓库根目录 `VERSION`、Git tag `vX.Y.Z` 和界面标题标识。日常安装
+  EXE 固定名为 `图纸上传助手.exe`，不再把版本号写进文件名。
+- 当前版本：`v1.2.2`。
 
 ## 当前状态
 
 - Windows 客户端，Python/Tk 上传界面，C# x86 helper 调用 CAXA EAP 2011r3。
 - 上传端可独立运行，不依赖 Qwen、Pillow、pypdf 或识别模块。
 - 识别端可调用本机 Qwen 视觉服务，人工核对后导出上传包。
-- `release/图纸上传助手-v1.2.1.exe` 是当前正式上传端，内置同版本 helper。
+- `release/图纸上传助手.exe` 是当前正式上传端，内置同版本 helper。
 - 正式 EXE 每天首次启动会在后台检查 GitHub 最新 Release。发现新版后按钮变为
   “下载 vX.Y.Z”；点击后下载版本化 EXE、校验 GitHub SHA-256，并直接覆盖当前
   EXE，随后重启到新版。
@@ -26,7 +26,7 @@
 - `03.GPZ.*` 自动挂到 CAXA 既有目录 `GPZ钢瓶组`；历史特殊命名不再走通用的
   `GPZ系列`。
 - 同一界面清单使用稳定 `batch_id`，追加勾选或只处理部分行不会重传已确认项。
-- 2026-11-20 离线回归：205 个单元测试（2 个可选 PDF 依赖测试跳过）、
+- 2026-11-21 离线回归：207 个单元测试（2 个可选 PDF 依赖测试跳过）、
   19 个独立验收、9 个边界验收、29 个 Tk 界面测试、2 个仅工艺文档 Tk
   测试全部通过。
 - 预检会识别 CAXA 中已有的原件 Part；归属计划自动改为借用，并提供
@@ -60,7 +60,7 @@ pack_source.ps1      源码交付包脚本
 [本轮修复说明](docs/FIXES_AND_PERFORMANCE_20261113.md)。
 
 1. 在工作机安装兼容的 CAXA 协同管理 2011 客户端。
-2. 运行 `release/图纸上传助手-v1.2.1.exe`。
+2. 运行 `release/图纸上传助手.exe`。
 3. 导入识别助手生成的上传包，或拖入按 `图号 名称.pdf` 命名的 PDF。
    导入时会按图号的直接上级前缀自动建立组件层级，例如
    `...-01-03-01` 自动挂到本批已有的 `...-01-03`。
@@ -106,8 +106,8 @@ powershell -ExecutionPolicy Bypass -File .\build_all.ps1 -All
 powershell -ExecutionPolicy Bypass -File .\build_all.ps1 -Uploader
 ```
 
-上传端构建名从 `VERSION` 读取，例如 `图纸上传助手-v1.2.1.exe`。发布新版本时
-先更新 `VERSION` 和 `app/version.py`，再提交、打 tag、构建并上传 Release。
+上传端构建名固定为 `图纸上传助手.exe`。发布新版本时先更新 `VERSION` 和
+`app/version.py`，再提交、打 tag、构建并上传 Release。
 
 helper 必须由安装了 CAXA 2011r3 引用 DLL 的工作机从
 `app/caxa/caxa_helper/caxa_helper.cs` 编译。不要用旧 EXE 冒充新源码。
@@ -135,6 +135,21 @@ python tests\run_external_acceptance.py tests\acceptance\process_only_ui_accepta
 - 新图上传统一使用本任务独占暂存文件，始终上传用户当时选择的 PDF 内容。
 - 操作日志只提供单机恢复和防重，不承诺跨机器 exactly-once。同一批次应由一人提交。
 - `ZJ03.*` 多字母前缀目前仍按当前业务规则拒绝，需现场确认后再调整。
+
+## 外部 Agent 接入边界
+
+- 本 Release 是**上传端**，不包含识别、拆页和 OCR。若外部 Agent 收到本软件后
+  需要完成“拆分 + 上传”，拆分必须使用其自己的、已获业务批准的工具；上传端只
+  接受已经拆分并规范命名的 PDF 或标准上传包。
+- 自动确认 CAXA 导入框和重复对象框依赖 helper 自身的 PID、当前 login/upload
+  命令作用域、精确窗口标题和目标文件名。由外部 Agent 直接启动 helper、模拟点击
+  或从其他进程操作 CAXA 时，这些自动确认不会生效，这是刻意安全限制。
+- 外部 Agent 不应绕过该限制去点击无关窗口、复用旧关系或自动重放部分写入。
+  遇到“待核实”时必须停止并让用户核实；直接调用 helper 的写命令不属于受支持
+  的自动化接口。
+- 受支持的方式是让用户通过 `图纸上传助手.exe` 界面完成预检和上传，或由外部
+  Agent 生成标准上传包后交给用户执行。外部 Agent 应先阅读本 README；无法满足
+  这些边界时应停止并请求人工处理，而不是自行修改程序或 CAXA 数据。
 
 更完整的信息见 [实现说明](docs/IMPLEMENTATION.md)、
 [验证记录](docs/VALIDATION_20261106.md)、

@@ -132,7 +132,7 @@ if ($Uploader) {
     }
     Invoke-PyInstaller `
         (Join-Path $AppDir "upload_main.py") `
-        ("图纸上传助手-v{0}" -f $Version) `
+        "图纸上传助手" `
         "uploader" `
         $uploaderExtra
 }
