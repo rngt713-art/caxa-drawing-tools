@@ -21,6 +21,14 @@
   one-file 构建通过。
 - 当前 uploader：
   `d3033971a871163e6c5f37dc29dd7e0127472b04314ca3326d772972131227ff`
+- `v1.2.2` 已发布：
+  `https://github.com/rngt713-art/caxa-drawing-tools/releases/tag/v1.2.2`
+- Release 目标远端提交：
+  `322907282cedebc8bac7cf2c78388993810083b5`。
+- Release 资产：
+  - 稳定名 `CAXA-Drawing-Uploader.exe`
+  - 兼容别名 `CAXA-Drawing-Uploader-v1.2.2.exe`
+  - `README-v1.2.2.md`
 
 ## 2026-11-21 v1.2.1 LinkSubPart 回归热修复
 
