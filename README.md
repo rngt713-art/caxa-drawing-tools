@@ -5,6 +5,8 @@
 
 ## 发布与源码
 
+- Agent 的拆图、聊天核对与提交示例见 [CAXA 图纸交接 MCP](agent-mcp/README.md)，可[下载示例 ZIP](agent-mcp/caxa-agent-mcp-example-v0.1.0.zip)。
+
 - GitHub Releases 只分发编译后的上传端 EXE 和对应版本的 README。
 - 源码统一从公开仓库 clone：
   `https://github.com/rngt713-art/caxa-drawing-tools.git`
