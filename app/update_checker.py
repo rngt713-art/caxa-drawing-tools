@@ -14,7 +14,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import date
 from pathlib import Path
 from typing import BinaryIO, Callable, Mapping
@@ -387,6 +387,7 @@ def apply_update(
     source_exe: str | os.PathLike | None = None,
     wait_exit: Callable = wait_for_process_exit,
     popen: Callable = subprocess.Popen,
+    sleep: Callable = time.sleep,
 ) -> tuple[object, Path]:
     """Replace the old EXE with the running update-mode EXE and relaunch it."""
     wait_exit(parent_pid)
@@ -417,12 +418,8 @@ def apply_update(
         replaced = True
         if _sha256_file(old) != _sha256_file(source):
             raise UpdateError("覆盖后的 EXE 校验失败")
-        process = popen(
-            [str(old)],
-            cwd=str(old.parent),
-            env=_clean_pyinstaller_environment(),
-        )
-    except Exception:
+        process = launch_update(old, popen=popen, sleep=sleep)
+    except Exception as exc:
         try:
             temporary.unlink()
         except OSError:
@@ -430,8 +427,11 @@ def apply_update(
         if replaced and backup is not None:
             try:
                 os.replace(backup, old)
-            except OSError:
-                pass
+            except OSError as rollback_error:
+                raise UpdateError(
+                    "新版启动或覆盖失败：%s；无法恢复旧版本：%s；旧版备份：%s"
+                    % (exc, rollback_error, backup)
+                ) from rollback_error
         raise
     return process, backup or old
 
@@ -572,6 +572,12 @@ class UpdateStateStore:
             return UpdateInfo.from_state(current_version, self._state)
         except (TypeError, ValueError, UpdateError):
             return None
+
+    def clear_cached_update(self) -> None:
+        for field in fields(UpdateInfo):
+            self._state.pop(field.name, None)
+        self._state.pop("last_check_date", None)
+        self._save()
 
     def mark_attempt(
         self,

@@ -307,7 +307,7 @@ class OwnBorrowTests(unittest.TestCase):
         uploader = RuleUploader(bridge, parts={"01.02": 12, "01.03": 13})
         row = uploader.link_relation("01.02", "01.03", "own")
         self.assertEqual(row["status"], "待核实")
-        self.assertIn("reference", row["note"])
+        self.assertIn("回读为借用，计划为归属", row["note"])
 
     def test_link_relation_existing_wrong_type_is_conflict(self):
         bridge = RuleBridge(children=[{"sub_id": 13, "reference": False}])
@@ -1433,7 +1433,7 @@ class MachineAndClassTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             UnverifiedResult,
-            "图纸挂接未确认",
+            "CAXA 未确认文档挂接结果",
         ) as caught:
             uploader.upload_item(
                 item,

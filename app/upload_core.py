@@ -27,6 +27,7 @@ import drawing_bundle
 import journal as journal_module
 import relations as relations_module
 import staging as staging_module
+from upload_ui_logic import recovery_kind_label, recovery_operation_subject
 from caxa.bridge import CaxaBridge, CaxaError
 from caxa.uploader import (
     CLASS_ID_CAPP,
@@ -415,7 +416,7 @@ def half_product_target_state(uploader, machine: str) -> dict:
     )
     blocked_reason = ""
     if product is None:
-        blocked_reason = "Product 02 半成品不存在"
+        blocked_reason = "产品「02 半成品」不存在"
     elif len(candidates) > 1:
         blocked_reason = "目标半成品存在多个原件"
     elif len(parent_candidates) > 1:
@@ -718,7 +719,7 @@ def _require_document_evidence(journal, task_id, confirmed, codes):
             class_name=record.get("class_name") or "",
             iterator_no=record.get("iterator_no") or "",
             detail=record.get("detail") or "",
-            error="成功记录的远端文档 ID 或文档类型无效/不匹配，请重新核实",
+            error="已完成记录中的文档资料缺失或类型不符，请重新核实",
         )
         invalid_confirmations.append(journal.get_operation(task_id, "upload", code))
     if invalid_confirmations:
@@ -746,8 +747,9 @@ def _require_workflow_evidence(journal, task_id, record):
         valid = False
     if valid:
         return
+    key = record["key"]
     journal.record_operation(
-        task_id, "workflow", "workflow", status=journal_module.OP_PENDING,
+        task_id, "workflow", key, status=journal_module.OP_PENDING,
         phase=record.get("phase") or "workflow",
         remote_id=record.get("remote_id") or "",
         class_name=record.get("class_name") or "workflow",
@@ -755,7 +757,7 @@ def _require_workflow_evidence(journal, task_id, record):
         error=("历史流程成功证据不完整，请人工核实真实流程及关联文档清单；"
                "原计划集合缺失时须重建证据，不能仅因日志缺失确认未写入"),
     )
-    raise _pending_error([journal.workflow(task_id)])
+    raise _pending_error([journal.get_operation(task_id, "workflow", key)])
 
 
 def _workflow_from_record(record: dict) -> dict:
@@ -783,6 +785,22 @@ def _workflow_from_record(record: dict) -> dict:
     }
 
 
+def _workflow_key(records: list[dict], document_ids: list[int]) -> str:
+    if not records:
+        return "workflow"
+    document_set = set(document_ids)
+    for row in records:
+        if row["status"] == journal_module.OP_FAILED:
+            try:
+                recorded = json.loads(row["detail"])["drawing_ids"]
+                if set(int(value) for value in recorded) == document_set:
+                    return row["key"]
+            except (KeyError, TypeError, ValueError):
+                continue
+    encoded = ",".join(str(value) for value in sorted(document_set))
+    return "workflow-" + hashlib.sha256(encoded.encode("ascii")).hexdigest()
+
+
 def content_lock_key(digest: str, account: dict) -> str:
     """One lock per batch content + login, covering lookup/create/writes."""
     seed = "%s|%s|%s|%s" % (
@@ -795,12 +813,14 @@ def content_lock_key(digest: str, account: dict) -> str:
 
 
 def _pending_error(pending: list[dict]) -> PendingVerificationError:
-    detail = "；".join(
-        "%s %s(%s)" % (row["kind"], row["key"], row["status"]) for row in pending[:8]
-    )
+    operations = []
+    for row in pending[:8]:
+        label = recovery_kind_label(row.get("kind"))
+        subject = recovery_operation_subject(row)
+        name = label if subject == label else "%s %s" % (label, subject)
+        operations.append("%s（%s）" % (name, row["status"]))
     return PendingVerificationError(
-        "本批次存在结果待核实/中断的操作，已阻止自动重放，请先用核实命令处理：%s"
-        % detail,
+        "本批次还有待核实或中断的操作，请先核实这些结果：%s" % "；".join(operations),
         pending=pending,
     )
 
@@ -817,7 +837,7 @@ def _phase_blockers(failures, pending_codes, relation_failures, relation_pending
     if relation_pending:
         blockers.append("%d 条关系结果待核实" % relation_pending)
     if not drawing_ids:
-        blockers.append("没有已验证的 Drawing/CappDocument 可关联")
+        blockers.append("没有可关联的已确认图纸或工艺文档")
     return blockers
 
 
@@ -936,11 +956,20 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                 log("图纸 %s 的内容已变化，本任务将重新上传当前版本" % code)
         decisions = journal.relation_decisions(task_id)
         confirmed_relations = journal.confirmed_relations(task_id)
-        stored_workflow = journal.workflow(task_id)
+        workflow_records = journal.operations(task_id, "workflow")
 
         # Historical recovery records must provide usable document evidence.
         _require_document_evidence(journal, task_id, confirmed, selected_codes)
-        _require_workflow_evidence(journal, task_id, stored_workflow)
+        for record in workflow_records:
+            _require_workflow_evidence(journal, task_id, record)
+        previous_workflows = [
+            _workflow_from_record(record) for record in workflow_records
+            if record["status"] == journal_module.OP_OK
+        ]
+        covered_document_ids = {
+            object_id for result in previous_workflows
+            for object_id in result["drawing_ids"]
+        }
 
         # Reconcile "已上传" claims against this machine's journal only.
         for item in items:
@@ -990,10 +1019,20 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                     stage="workflow_only",
                 )
 
-        workflow_missing = bool(start_workflow) and not (
-            stored_workflow and stored_workflow["status"] == journal_module.OP_OK
+        confirmed_selected = _confirmed_workflow_documents(confirmed, selected_codes)
+        workflow_missing = start_workflow and (
+            todo or any(row["object_id"] not in covered_document_ids for row in confirmed_selected)
         )
-        needs_connection = bool(todo or relations_pending or workflow_missing)
+        needs_connection = bool(todo or relations_pending or workflow_missing or (workflow_only and relations))
+
+        def record_attach_attempt(code, baseline):
+            row = journal.get_operation(task_id, "upload", code)
+            detail = json.loads(row["detail"])
+            detail["attach_attempt"] = baseline
+            journal.record_operation(
+                task_id, "upload", code, status=journal_module.OP_RUNNING,
+                phase="upload", item_code=code, detail=json.dumps(detail, ensure_ascii=False),
+            )
 
         # 2) connect only when there is work (or classification needs the tree)
         if needs_connection:
@@ -1014,6 +1053,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                 on_duplicate=on_duplicate,
                 staging_dir=staging_module.TaskStaging(task_id, root=staging_root, log=log),
                 auto_confirm=auto_confirm,
+                before_attach=record_attach_attempt,
             )
             if not workflow_only:
                 duplicate_parts = []
@@ -1022,7 +1062,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                 )
                 if duplicate_parts:
                     raise CaxaError(
-                        "CAXA 中同一图号存在多个原件 Part，请先清理重复对象：%s"
+                        "CAXA 中同一图号存在多个原件，请先清理重复对象：%s"
                         % "、".join(duplicate_parts[:20]),
                         stage="duplicate_existing_parts",
                     )
@@ -1031,7 +1071,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                 )
                 if original_rules["missing_borrow_positions"]:
                     raise CaxaError(
-                        "以下已有原件选择了“升版并借用”，但没有设置借用父级：%s"
+                        "以下已有原件的「借用处理」选了「按计划借用」，请设置借用父级：%s"
                         % "、".join(original_rules["missing_borrow_positions"][:20]),
                         stage="existing_original_relation",
                     )
@@ -1062,10 +1102,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
             user_id = None
             if start_workflow and workflow_missing:
                 user_id = find_person_id(bridge, account["user"])
-                log(
-                    "当前 CAXA 人员：%s（Person %s）"
-                    % (account["user"], user_id)
-                )
+                log("已识别 CAXA 登录人员：%s" % account["user"])
             half_product_codes = [
                 target["machine"]
                 for target in machine_targets
@@ -1132,7 +1169,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                 ).strip():
                     raise CaxaError(
                         "03整机 %s 的系列产品不存在，"
-                        "请在对应03整机或工艺文档行填写系列产品名称"
+                        "请在上传清单中对应的系列产品行填写名称"
                         % machine_code,
                         stage="series_product_name",
                     )
@@ -1178,14 +1215,18 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                     # an old borrow/own result forever in the task journal.
                     log(
                         "关系分类规则已更新：%s ← %s，%s → %s"
-                        % (key[0], key[1], decisions[key], expected)
+                        % (
+                            key[0], key[1],
+                            "借用" if decisions[key] == "borrow" else "归属",
+                            "借用" if expected == "borrow" else "归属",
+                        )
                     )
                 # Relation type is determined by the drawing-code structure.
                 # Only manual link-only rows require a live existence probe.
                 rel["auto_decided"] = False
                 if uploader is None:
                     raise CaxaError(
-                        "需要连接 CAXA 以判定关系类型（own/borrow）", stage="plan_relations"
+                        "需要连接 CAXA，以确定关系为归属或借用", stage="plan_relations"
                     )
                 if rel.get("link_only") and key[1] not in cache:
                     cache[key[1]] = uploader.find_part(key[1]) is not None
@@ -1269,6 +1310,11 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
             journal.record_operation(
                 task_id, "upload", code, status=journal_module.OP_RUNNING,
                 phase="upload", item_code=code,
+                detail=json.dumps({
+                    "sha256": str(item.get("sha256") or "").lower(),
+                    "size": item.get("size"),
+                    "attach_attempt": None,
+                }, ensure_ascii=False),
             )
             try:
                 explicit_parent = own_parent_map.get(code) or drawing_bundle.normalize_code(
@@ -1308,7 +1354,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                         {
                             "file_name": str(result.get("file_name") or ""),
                             "target": str(result.get("target") or ""),
-                            "sha256": str(item.get("sha256") or "").lower(),
+                            "sha256": str(result.get("staged_sha256") or item.get("sha256") or "").lower(),
                             "size": item.get("size"),
                         },
                         ensure_ascii=False,
@@ -1358,7 +1404,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                     phase="upload", item_code=code, error=str(exc),
                 )
                 log("整机不存在：%s" % exc)
-            except (CaxaError, OSError, ValueError) as exc:
+            except (CaxaError, OSError, ValueError, staging_module.StagingError) as exc:
                 uncertain_flag = bool(getattr(exc, "uncertain", False))
                 partial = bool(getattr(exc, "partial", False))
                 stage = getattr(exc, "stage", "") or ""
@@ -1373,6 +1419,9 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                 if uncertain_flag or partial:
                     uncertain.append(item)
                     pending_upload_codes.add(code)
+                    operation = journal.get_operation(task_id, "upload", code)
+                    attempt = json.loads(operation["detail"])
+                    attempt.update(partial=partial, stage=stage, result=error_result)
                     journal.record_operation(
                         task_id, "upload", code, status=journal_module.OP_PENDING,
                         phase="upload:%s" % stage, item_code=code, error=str(exc),
@@ -1380,11 +1429,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                         or error_result.get("created_part_id") or "",
                         class_id=error_result.get("class_id") or "",
                         iterator_no=str(error_result.get("iterator_no") or ""),
-                        detail=json.dumps(
-                            {"partial": partial, "stage": stage,
-                             "result": error_result},
-                            ensure_ascii=False,
-                        ),
+                        detail=json.dumps(attempt, ensure_ascii=False),
                     )
                 else:
                     failures.append(item)
@@ -1401,6 +1446,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
         relation_failures = 0
         relation_pending = 0
         relation_executed = 0
+        missing_workflow_relations = []
         for rel in relations:
             parent = drawing_bundle.normalize_code(rel.get("parent_code"))
             child = drawing_bundle.normalize_code(rel.get("child_code"))
@@ -1471,7 +1517,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                     {
                         "parent_code": parent, "child_code": child,
                         "link_type": link_type, "status": "未执行",
-                        "note": "本次未启用关系执行（borrow_missing=false），必需关系未完成",
+                        "note": "本次未执行归属或借用，计划中的关系尚未完成",
                     }
                 )
                 log("必须执行的关系未执行：%s ← %s" % (parent, child))
@@ -1572,6 +1618,9 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                 if issue.get("reason") != "missing_link":
                     continue
                 parent, child = relation_identity(issue)
+                if workflow_only:
+                    missing_workflow_relations.append("%s ← %s" % (parent, child))
+                    continue
                 record = journal.get_operation(
                     task_id, "relation", journal_module.relation_key(parent, child)
                 )
@@ -1645,158 +1694,161 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
         workflow_documents = _confirmed_workflow_documents(final_confirmed, selected_codes)
         missing_document_codes = selected_codes - final_confirmed.keys()
         drawing_ids = [row["object_id"] for row in workflow_documents]
-        document_class_ids = [row["class_id"] for row in workflow_documents]
+        uncovered_documents = [
+            row for row in workflow_documents if row["object_id"] not in covered_document_ids
+        ]
+        uncovered_ids = [row["object_id"] for row in uncovered_documents]
+        document_class_ids = [row["class_id"] for row in uncovered_documents]
         workflow_result: dict | None = None
         workflow_blocked = ""
         workflow_started_now = False
         if start_workflow:
-            if stored_workflow and stored_workflow["status"] == journal_module.OP_OK:
-                workflow_result = _workflow_from_record(stored_workflow)
-                workflow_result["duplicate"] = True
-                workflow_result["note"] = (
-                    "本任务已发起过该流程，未重复创建；如审核人/模板需要变更，请人工处理"
+            blockers = _phase_blockers(
+                failures, pending_upload_codes, relation_failures,
+                relation_pending, drawing_ids,
+            )
+            if missing_document_codes:
+                blockers.append("%d 项选中文档缺少已确认上传记录" % len(missing_document_codes))
+            if missing_workflow_relations:
+                blockers.append(
+                    "CAXA 中缺少关系 %s，请先完成关系补建，再单独发起流程"
+                    % "、".join(missing_workflow_relations[:8])
                 )
-                log("流程已存在（本任务已发起）：%s" % workflow_result.get("process_instance_id"))
-            elif stored_workflow and stored_workflow["status"] in (
-                journal_module.OP_PENDING, journal_module.OP_RUNNING,
-            ):
-                workflow_blocked = "上次流程结果待核实，未重复创建"
+            if blockers:
+                workflow_blocked = "已阻止发起流程：" + "、".join(blockers)
                 workflow_result = {
-                    "status": WORKFLOW_PENDING,
-                    "process_instance_id": stored_workflow.get("remote_id") or None,
+                    "status": WORKFLOW_BLOCKED,
                     "reason": workflow_blocked,
                     "drawing_ids": drawing_ids,
                 }
-                log("%s（流程ID %s）" % (workflow_blocked, workflow_result["process_instance_id"]))
+                log(workflow_blocked)
+            elif not uncovered_ids:
+                selected_ids = set(drawing_ids)
+                matching = [
+                    result for result in previous_workflows
+                    if selected_ids.intersection(result["drawing_ids"])
+                ]
+                workflow_result = {
+                    **matching[-1],
+                    "drawing_ids": drawing_ids,
+                    "process_instance_ids": [result["process_instance_id"] for result in matching],
+                    "duplicate": True,
+                    "note": "所有选中文档已有本批审核打印流程，未重复发起",
+                }
+                log(workflow_result["note"])
             else:
-                blockers = _phase_blockers(
-                    failures, pending_upload_codes, relation_failures,
-                    relation_pending, drawing_ids,
+                workflow_key = _workflow_key(workflow_records, uncovered_ids)
+                if progress:
+                    progress(total, total, "正在发起审核打印流程")
+                journal.set_task_stage(task_id, "workflow")
+                journal.record_workflow(
+                    task_id, key=workflow_key, status=journal_module.OP_RUNNING, process_id=None,
+                    stage="create", drawing_ids=uncovered_ids,
                 )
-                if missing_document_codes:
-                    blockers.append("%d 项选中文档缺少已确认上传记录" % len(missing_document_codes))
-                if blockers:
-                    workflow_blocked = "已阻止发起流程：" + "、".join(blockers)
-                    workflow_result = {
-                        "status": WORKFLOW_BLOCKED,
-                        "reason": workflow_blocked,
-                        "drawing_ids": drawing_ids,
-                    }
-                    log(workflow_blocked)
-                else:
-                    if progress:
-                        progress(total, total, "正在发起审核打印流程")
-                    journal.set_task_stage(task_id, "workflow")
-                    journal.record_workflow(
-                        task_id, status=journal_module.OP_RUNNING, process_id=None,
-                        stage="create", drawing_ids=drawing_ids,
+                try:
+                    performer_id = find_person_id(bridge, performer_name)
+                    raw = bridge.start_workflow(
+                        uncovered_ids,
+                        account["ip"],
+                        int(account["port"]),
+                        user_id,
+                        document_class_ids=document_class_ids,
+                        performer_id=performer_id,
+                        template_id=workflow_template_id,
+                        template_instance_id=workflow_template_instance_id,
+                        process_def_id=workflow_process_def_id,
+                        activity_def_id=workflow_activity_def_id,
+                        execute=True,
+                    )
+                    process_id = raw.get("process_instance_id")
+                    started = raw.get("started") is True
+                    process_state = str(raw.get("process_state") or "")
+                    state_verified = (
+                        raw.get("state_verified") is True
+                        and process_state == "2"
                     )
                     try:
-                        performer_id = find_person_id(bridge, performer_name)
-                        raw = bridge.start_workflow(
-                            drawing_ids,
-                            account["ip"],
-                            int(account["port"]),
-                            user_id,
-                            document_class_ids=document_class_ids,
-                            performer_id=performer_id,
-                            template_id=workflow_template_id,
-                            template_instance_id=workflow_template_instance_id,
-                            process_def_id=workflow_process_def_id,
-                            activity_def_id=workflow_activity_def_id,
-                            execute=True,
-                        )
-                        process_id = raw.get("process_instance_id")
-                        started = raw.get("started") is True
-                        process_state = str(raw.get("process_state") or "")
-                        state_verified = (
-                            raw.get("state_verified") is True
-                            and process_state == "2"
-                        )
+                        positive = int(process_id or 0) > 0
+                    except (TypeError, ValueError):
+                        positive = False
+                    # A successful start call is insufficient. Require a
+                    # live state read (2 OPEN__RUNNING) and the exact
+                    # document set read back from the process object.
+                    link_ids = raw.get("linked_document_ids")
+                    linkage_ok = False
+                    if (
+                        raw.get("documents_verified") is True
+                        and isinstance(link_ids, list)
+                    ):
                         try:
-                            positive = int(process_id or 0) > 0
+                            linkage_ok = (
+                                set(int(v) for v in link_ids)
+                                == set(uncovered_ids)
+                            )
                         except (TypeError, ValueError):
-                            positive = False
-                        # A successful start call is insufficient. Require a
-                        # live state read (2 OPEN__RUNNING) and the exact
-                        # document set read back from the process object.
-                        link_ids = raw.get("linked_document_ids")
-                        linkage_ok = False
-                        if (
-                            raw.get("documents_verified") is True
-                            and isinstance(link_ids, list)
-                        ):
-                            try:
-                                linkage_ok = (
-                                    set(int(v) for v in link_ids)
-                                    == set(int(v) for v in drawing_ids)
-                                )
-                            except (TypeError, ValueError):
-                                linkage_ok = False
-                        if not started or not positive or not state_verified or not linkage_ok:
-                            workflow_result = {
-                                "status": WORKFLOW_PENDING,
-                                "process_instance_id": process_id,
-                                "reason": (
-                                    "流程返回未确认启动（started=%s, id=%s, "
-                                    "state=%s, 状态回读=%s, 文档回读=%s/%s）"
-                                    % (
-                                        raw.get("started"),
-                                        process_id,
-                                        process_state or "未知",
-                                        state_verified,
-                                        len(link_ids) if isinstance(link_ids, list) else "未知",
-                                        len(drawing_ids),
-                                    )
-                                ),
-                                "drawing_ids": drawing_ids,
-                            }
-                            journal.record_workflow(
-                                task_id, status=journal_module.OP_PENDING,
-                                process_id=process_id, stage="started_unconfirmed",
-                                drawing_ids=drawing_ids, started=False,
-                                error=workflow_result["reason"],
-                            )
-                            log("流程启动未确认：%s" % workflow_result["reason"])
-                        else:
-                            workflow_result = {
-                                "status": WORKFLOW_STARTED,
-                                "process_instance_id": process_id,
-                                "drawing_ids": drawing_ids,
-                                "started": True,
-                                "process_state": process_state,
-                                "start_time": raw.get("process_start_time") or "",
-                                "linked_document_ids": [int(v) for v in link_ids],
-                            }
-                            workflow_started_now = True
-                            journal.record_workflow(
-                                task_id, status=journal_module.OP_OK,
-                                process_id=process_id, stage="started",
-                                drawing_ids=drawing_ids, started=True,
-                                detail="state=%s, linked_documents=%s"
-                                % (process_state, len(link_ids)),
-                            )
-                            log("流程已发起：WFProcessInst %s" % process_id)
-                    except CaxaError as exc:
-                        process_id = getattr(exc, "created_process_instance_id", None)
-                        uncertain_flag = bool(getattr(exc, "uncertain", False)) or bool(process_id)
+                            linkage_ok = False
+                    if not started or not positive or not state_verified or not linkage_ok:
                         workflow_result = {
-                            "status": WORKFLOW_PENDING if uncertain_flag else WORKFLOW_FAILED,
+                            "status": WORKFLOW_PENDING,
                             "process_instance_id": process_id,
-                            "reason": str(exc),
-                            "stage": getattr(exc, "stage", ""),
-                            "drawing_ids": drawing_ids,
+                            "reason": (
+                                "流程启动结果待核实。流程实例 ID %s，启动%s，运行状态%s，关联文档已回读 %s 项（计划 %d 项）"
+                                % (
+                                    process_id if positive else "未返回",
+                                    "已确认" if started else "未确认",
+                                    "已确认" if state_verified else "未确认",
+                                    len(link_ids) if isinstance(link_ids, list) else "未知",
+                                    len(uncovered_ids),
+                                )
+                            ),
+                            "drawing_ids": uncovered_ids,
                         }
                         journal.record_workflow(
-                            task_id,
-                            status=journal_module.OP_PENDING if uncertain_flag
-                            else journal_module.OP_FAILED,
-                            process_id=process_id,
-                            stage=getattr(exc, "stage", "") or "workflow",
-                            drawing_ids=drawing_ids,
-                            error=str(exc),
+                            task_id, key=workflow_key, status=journal_module.OP_PENDING,
+                            process_id=process_id, stage="started_unconfirmed",
+                            drawing_ids=uncovered_ids, started=False,
+                            error=workflow_result["reason"],
                         )
-                        log("流程未确认完成：%s（流程ID %s）" % (exc, process_id))
+                        log("流程启动未确认：%s" % workflow_result["reason"])
+                    else:
+                        workflow_result = {
+                            "status": WORKFLOW_STARTED,
+                            "process_instance_id": process_id,
+                            "drawing_ids": uncovered_ids,
+                            "started": True,
+                            "process_state": process_state,
+                            "start_time": raw.get("process_start_time") or "",
+                            "linked_document_ids": [int(v) for v in link_ids],
+                        }
+                        workflow_started_now = True
+                        journal.record_workflow(
+                            task_id, key=workflow_key, status=journal_module.OP_OK,
+                            process_id=process_id, stage="started",
+                            drawing_ids=uncovered_ids, started=True,
+                            detail="state=%s, linked_documents=%s"
+                            % (process_state, len(link_ids)),
+                        )
+                        log("流程已发起，流程实例 ID %s" % process_id)
+                except CaxaError as exc:
+                    process_id = getattr(exc, "created_process_instance_id", None)
+                    uncertain_flag = bool(getattr(exc, "uncertain", False)) or bool(process_id)
+                    workflow_result = {
+                        "status": WORKFLOW_PENDING if uncertain_flag else WORKFLOW_FAILED,
+                        "process_instance_id": process_id,
+                        "reason": str(exc),
+                        "stage": getattr(exc, "stage", ""),
+                        "drawing_ids": uncovered_ids,
+                    }
+                    journal.record_workflow(
+                        task_id, key=workflow_key,
+                        status=journal_module.OP_PENDING if uncertain_flag
+                        else journal_module.OP_FAILED,
+                        process_id=process_id,
+                        stage=getattr(exc, "stage", "") or "workflow",
+                        drawing_ids=uncovered_ids,
+                        error=str(exc),
+                    )
+                    log("流程未确认完成：%s（流程实例 ID %s）" % (exc, process_id))
 
         uploaded_total = sum(1 for item in items if item.get("status") == ITEM_DONE)
         ok = (

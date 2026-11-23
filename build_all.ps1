@@ -1,10 +1,10 @@
 # 图纸上传/识别两个入口的 Windows 构建脚本（在工作设备上运行）
 #
 # 用法示例（在工作设备、已安装 CAXA 2011 客户端与 Python 依赖后）：
-#   powershell -ExecutionPolicy Bypass -File .\build_all.ps1 -All
-#   powershell -ExecutionPolicy Bypass -File .\build_all.ps1 -Uploader -Recognizer
-#   powershell -ExecutionPolicy Bypass -File .\build_all.ps1 -Helper -Force
-#   powershell -ExecutionPolicy Bypass -File .\build_all.ps1 -All -PlanOnly   # 只检查环境/路径
+#   pwsh -NoProfile -ExecutionPolicy Bypass -File .\build_all.ps1 -All
+#   pwsh -NoProfile -ExecutionPolicy Bypass -File .\build_all.ps1 -Uploader -Recognizer
+#   pwsh -NoProfile -ExecutionPolicy Bypass -File .\build_all.ps1 -Helper -Force
+#   pwsh -NoProfile -ExecutionPolicy Bypass -File .\build_all.ps1 -All -PlanOnly
 #
 # 说明：
 # - Helper（caxa_helper.exe）必须引用现场 CAXA 2011 的 DLL，只有工作设备能编译；
@@ -31,6 +31,10 @@ $AppDir = Join-Path $Root "app"
 $HelperDir = Join-Path $AppDir "caxa\caxa_helper"
 $Version = (Get-Content (Join-Path $Root "VERSION") -Raw).Trim()
 if (-not $Version) { throw "VERSION 文件为空" }
+$pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+if (-not $pwsh) {
+    throw "找不到 PowerShell 7（pwsh）。helper 构建脚本含 UTF-8 中文，不能用 Windows PowerShell 5 解析。"
+}
 
 if ($All) { $Helper = $true; $Uploader = $true; $Recognizer = $true }
 if (-not ($Helper -or $Uploader -or $Recognizer)) {
@@ -79,11 +83,14 @@ if ($Helper) {
     $helperScript = Join-Path $HelperDir "build_helper.ps1"
     Assert-File $helperScript "helper 构建脚本"
     if ($PlanOnly) {
-        & powershell -ExecutionPolicy Bypass -File $helperScript -PlanOnly
+        & $pwsh.Source -NoProfile -ExecutionPolicy Bypass -File $helperScript -PlanOnly
+        if ($LASTEXITCODE -ne 0) {
+            throw "helper 依赖检查失败（退出码 $LASTEXITCODE）"
+        }
     } else {
         $helperArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $helperScript)
         if ($Force) { $helperArgs += "-Force" }
-        & powershell @helperArgs
+        & $pwsh.Source @helperArgs
         if ($LASTEXITCODE -ne 0) { throw "helper 编译失败（退出码 $LASTEXITCODE）" }
     }
 }
@@ -124,8 +131,31 @@ if ($Uploader) {
     $helperExe = Join-Path $HelperDir "caxa_helper.exe"
     if (-not $PlanOnly) {
         Assert-File $helperExe "已按当前源码编译的 CAXA helper"
+        $helperSource = Join-Path $HelperDir "caxa_helper.cs"
+        $helperBuildRecord = Join-Path $Root "build\caxa_helper.json"
+        $record = $null
+        if (Test-Path -LiteralPath $helperBuildRecord -PathType Leaf) {
+            try {
+                $record = Get-Content -LiteralPath $helperBuildRecord -Raw | ConvertFrom-Json
+            } catch {
+                $record = $null
+            }
+        }
+        if (-not $record -or
+            $record.source_sha256 -ne (Get-Sha256 $helperSource) -or
+            $record.exe_sha256 -ne (Get-Sha256 $helperExe)) {
+            throw "helper 与当前源码的编译记录不匹配，请先运行 .\build_all.ps1 -Helper -Force。"
+        }
     }
-    $uploaderExtra = @()
+    $iconIco = Join-Path $AppDir "assets\app-icon.ico"
+    $iconPng = Join-Path $AppDir "assets\app-icon.png"
+    Assert-File $iconIco "上传端 ICO 图标"
+    Assert-File $iconPng "上传端 PNG 图标"
+    $uploaderExtra = @(
+        "--icon", $iconIco,
+        "--add-data", "$iconIco;assets",
+        "--add-data", "$iconPng;assets"
+    )
     if (Test-Path $helperExe) {
         $uploaderExtra += "--add-binary"
         $uploaderExtra += "$helperExe;caxa/caxa_helper"

@@ -6,8 +6,10 @@ import unittest
 
 import _support
 import journal
+import recovery_verifier
 import upload_core
 from caxa.bridge import CaxaError
+from caxa.uploader import CaxaUploader
 
 
 class JournalSemanticsTests(unittest.TestCase):
@@ -173,6 +175,81 @@ class RecoveryTests(unittest.TestCase):
             content=b"%PDF-1",
         )
         return _support.make_manifest([item])
+
+    def test_lost_append_response_keeps_original_hash_and_prior_version(self):
+        class LostAttachmentReply(_support.FakeBridge):
+            def call(self, cmd, *args, **kwargs):
+                if cmd.get("cmd") == "upload":
+                    with journal.TaskJournal(journal_file) as state:
+                        task = state.list_tasks()[0]
+                        operation = state.get_operation(task["task_id"], "upload", "01.01")
+                    assert operation["status"] == journal.OP_RUNNING
+                    assert json.loads(operation["detail"])["attach_attempt"]["before_iterator_no"] == "b.1"
+                    raise CaxaError("reply lost", stage="upload", response_lost=True)
+                if cmd.get("cmd") == "query_parts":
+                    return {"items": [{"identity": "01.01", "object_id": 31}]}
+                if cmd.get("cmd") == "part_drawings":
+                    return {"drawings": [dict(drawing)]}
+                return super().call(cmd, *args, **kwargs)
+
+        class AttachmentUploader(_support.FakeUploader):
+            def __init__(self, bridge, **kwargs):
+                super().__init__(bridge, **kwargs)
+                self.real = CaxaUploader(
+                    bridge, before_attach=kwargs["before_attach"], log=lambda *args: None,
+                )
+
+            def upload_item(self, item, *args, **kwargs):
+                return self.real.attach_file(31, item["file_path"], 1, "01.01 test.pdf", "01.01")
+
+        manifest = self._manifest()
+        manifest["batch_id"] = "B-lost-append-hash"
+        file_hash = manifest["items"][0]["sha256"]
+        journal_file = self.journal_file
+        drawing = {
+            "object_id": 111, "name": "01.01 test.pdf", "class_id": 1002,
+            "iterator_no": "b.1", "history_count": 3,
+        }
+        bridge = LostAttachmentReply()
+        result, _ = _support.run_upload(
+            manifest, journal_file, bridge, uploader_cls=AttachmentUploader,
+        )
+        task_id = result["task_id"]
+        with journal.TaskJournal(journal_file) as state:
+            row, = state.pending_operations(task_id)
+            self.assertEqual(json.loads(row["detail"])["sha256"], file_hash)
+            verifier = recovery_verifier.RecoveryVerifier(bridge, CaxaUploader(bridge))
+            with self.assertRaisesRegex(recovery_verifier.RecoveryEvidenceError, "版次历史未增加"):
+                verifier.verify_upload(row)
+            drawing["iterator_no"], drawing["history_count"] = "b.2", 4
+            state.resolve_operation(task_id, "upload", row["key"], result="success", **verifier.verify_upload(row))
+            self.assertEqual(json.loads(state.confirmed_uploads(task_id)["01.01"]["detail"])["sha256"], file_hash)
+
+        manifest["items"] = [_support.make_item(self.root, "01.01", "test", content=b"%PDF replacement")]
+        renewed, _ = _support.run_upload(manifest, journal_file)
+        self.assertEqual(renewed["task_id"], task_id)
+        self.assertEqual(_support.FakeUploader.instances[-1].uploads, 1)
+
+    def test_local_staging_failure_is_retryable_without_pending_recovery(self):
+        class ChangedFile(_support.FakeUploader):
+            def upload_item(self, item, *args, **kwargs):
+                with open(item["file_path"], "ab") as stream:
+                    stream.write(b" updated during preflight")
+                return self.staging.stage(item)
+
+        manifest = self._manifest()
+        manifest["batch_id"] = "B-staging-no-write"
+        result, _ = _support.run_upload(manifest, self.journal_file, uploader_cls=ChangedFile)
+        self.assertEqual(result["failed"], 1)
+        with journal.TaskJournal(self.journal_file) as state:
+            self.assertEqual(state.pending_operations(result["task_id"]), [])
+            row = state.get_operation(result["task_id"], "upload", "01.01")
+            self.assertEqual(row["status"], journal.OP_FAILED)
+            self.assertIn("指纹不一致", row["error"])
+        manifest["items"] = [_support.make_item(self.root, "01.01", "test", content=b"%PDF updated")]
+        retried, _ = _support.run_upload(manifest, self.journal_file)
+        self.assertTrue(retried["ok"])
+        self.assertEqual(retried["task_id"], result["task_id"])
 
     def test_first_upload_registers_device_then_later_upload_skips(self):
         first_manifest = self._manifest()

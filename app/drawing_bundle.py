@@ -25,6 +25,13 @@ SUPPORTED_SCHEMA_VERSIONS = (1,)
 #: an unknown kind cannot be mapped to a verified CAXA document class.
 ITEM_KINDS = ("process_doc", "machine_drawing", "component")
 ALL_ITEM_KINDS = ITEM_KINDS + ("unknown",)
+ITEM_KIND_LABELS = {
+    "process_doc": "工艺文档",
+    "machine_drawing": "整机图纸",
+    "component": "组件图纸",
+    "unknown": "未知",
+}
+MACHINE_FIELD_LABEL = "所属整机或半成品图号"
 
 #: Every uploadable item needs an explicit machine for these kinds.
 MACHINE_REQUIRED_KINDS = ("process_doc", "machine_drawing")
@@ -139,7 +146,7 @@ def parse_drawing_filename(path: str) -> tuple[str, str, list[str]]:
     if is_single_letter_process_code(code):
         if name or " " in stem:
             errors.append(
-                "单字母工艺文档不应带中文名（应为“%s.pdf”，可点“一键规范文件名”裁去）"
+                "工艺文档应命名为「%s.pdf」。点击「规范并预检」可去掉中文名称。"
                 % code
             )
         return code, name, errors
@@ -148,7 +155,7 @@ def parse_drawing_filename(path: str) -> tuple[str, str, list[str]]:
         if not name:
             errors.append("数字开头图纸必须带中文名称（应为“图号 名称.pdf”）")
         elif re.match(r"^\S+\s{2,}", stem):
-            errors.append("图号与名称之间应只有一个空格（可点“一键规范文件名”修正）")
+            errors.append("图号与名称之间应只有一个空格。可点击「规范并预检」修正。")
         return code, name, errors
 
     if re.match(r"^[A-Z]{2,}\d{2}\.", code):
@@ -253,21 +260,24 @@ def item_problems(item: dict, *, check_content: bool = True) -> list[str]:
     elif not is_valid_code(code):
         problems.append("图号格式无效：%s" % code)
     if kind not in ITEM_KINDS:
-        problems.append("类型无效：%s（应为 %s）" % (kind or "空", "/".join(ITEM_KINDS)))
+        problems.append("请选择文档类型：%s" % "、".join(ITEM_KIND_LABELS[key] for key in ITEM_KINDS))
     elif is_valid_code(code):
         inferred, inferred_machine = infer_kind(code)
         if inferred != kind:
-            problems.append("类型 %s 与图号规则（%s）不一致" % (kind, inferred))
+            problems.append(
+                "文档类型「%s」与图号规则（%s）不一致"
+                % (ITEM_KIND_LABELS[kind], ITEM_KIND_LABELS[inferred])
+            )
         if kind in MACHINE_REQUIRED_KINDS:
             if not machine:
-                problems.append("缺少成品代码（%s 必须填写）" % kind)
+                problems.append("%s必须填写%s" % (ITEM_KIND_LABELS[kind], MACHINE_FIELD_LABEL))
             elif not is_valid_code(machine):
-                problems.append("成品代码格式无效：%s" % machine)
+                problems.append("%s格式无效：%s" % (MACHINE_FIELD_LABEL, machine))
             elif kind == "machine_drawing" and machine != code:
-                problems.append("整机图纸的成品代码应与图号一致：%s" % machine)
+                problems.append("整机图纸的所属整机图号应与图号一致：%s" % machine)
             elif kind == "process_doc" and machine != (inferred_machine or machine):
                 problems.append(
-                    "工艺文档 %s 的成品代码应为 %s（当前 %s）"
+                    "工艺文档 %s 的所属图号应为 %s（当前 %s）"
                     % (code, inferred_machine, machine)
                 )
     if is_digit_code(code) and not name:

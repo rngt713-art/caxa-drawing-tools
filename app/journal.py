@@ -342,6 +342,18 @@ class TaskJournal:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_tasks_with_pending_operations(self) -> list[dict]:
+        with self._lock:
+            placeholders = ",".join("?" for _ in PENDING_STATUSES)
+            rows = self._conn.execute(
+                "SELECT tasks.* FROM tasks WHERE EXISTS ("
+                " SELECT 1 FROM operations WHERE operations.task_id = tasks.task_id"
+                " AND operations.status IN (" + placeholders + "))"
+                " ORDER BY tasks.created_at DESC, tasks.task_id DESC",
+                tuple(PENDING_STATUSES),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def set_task_status(self, task_id: str, status: str, stage: str = "",
                         note: str = "") -> None:
         with self._lock:
@@ -526,7 +538,7 @@ class TaskJournal:
     def record_workflow(self, task_id: str, *, status: str, process_id: str | int | None,
                         stage: str = "", drawing_ids: list[int] | None = None,
                         started: bool = False, detail: str = "",
-                        error: str = "") -> dict:
+                        error: str = "", key: str = "workflow") -> dict:
         payload = {
             "drawing_ids": [int(v) for v in (drawing_ids or [])],
             "stage": stage or "",
@@ -537,7 +549,7 @@ class TaskJournal:
         return self.record_operation(
             task_id,
             "workflow",
-            "workflow",
+            key,
             status=status,
             phase=stage or "workflow",
             remote_id=process_id,

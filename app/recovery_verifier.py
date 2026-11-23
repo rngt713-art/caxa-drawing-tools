@@ -13,7 +13,7 @@ import re
 
 import drawing_bundle
 from caxa.bridge import CaxaBridge, CaxaError
-from caxa.uploader import CaxaUploader
+from caxa.uploader import CaxaUploader, document_type_label
 
 
 CLASS_ID_DRAWING = 1002
@@ -35,10 +35,10 @@ def _detail(row: dict) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _positive_int(value, label: str) -> int:
+def _positive_int(value, error: str) -> int:
     text = str(value or "").strip()
     if not text.isascii() or not text.isdecimal() or int(text) <= 0:
-        raise RecoveryEvidenceError("%s不是有效正整数" % label)
+        raise RecoveryEvidenceError(error)
     return int(text)
 
 
@@ -59,6 +59,12 @@ def _iteration_key(value):
 def _append_baseline(row: dict):
     """Return before-upgrade evidence for an append_iteration operation."""
     payload = _detail(row)
+    attempt = payload.get("attach_attempt")
+    if isinstance(attempt, dict) and attempt.get("append_iteration") is True:
+        return {
+            "before_history_count": _optional_nonnegative_int(attempt.get("before_history_count")),
+            "before_iterator_no": str(attempt.get("before_iterator_no") or "").strip(),
+        }
     result = payload.get("result")
     if not isinstance(result, dict):
         result = payload
@@ -147,6 +153,9 @@ def expected_target_filename(row: dict, item: dict | None = None) -> str:
         file_name = str(result.get("file_name") or "").strip()
         if file_name:
             return os.path.basename(file_name)
+    attempt = payload.get("attach_attempt") or {}
+    if isinstance(attempt, dict) and attempt.get("target_filename"):
+        return os.path.basename(attempt["target_filename"])
     for key in ("file_name", "target_filename"):
         file_name = str(payload.get(key) or "").strip()
         if file_name:
@@ -216,6 +225,9 @@ class RecoveryVerifier:
 
     def verify_upload(self, row: dict, item: dict | None = None) -> dict:
         """Find the uploaded document by code/file name and read its evidence."""
+        payload = _detail(row)
+        if "attach_attempt" in payload and payload["attach_attempt"] is None:
+            raise RecoveryEvidenceError("本次尚未提交图纸挂接，不能用已有图纸确认上传成功")
         code = drawing_bundle.normalize_code(
             row.get("item_code") or row.get("key")
         )
@@ -249,16 +261,17 @@ class RecoveryVerifier:
         ]
         if missing_class:
             raise RecoveryEvidenceError(
-                "CAXA helper 未返回图纸类型，请重建 helper 后再核实"
+                "CAXA 未返回可核实的文档类型，请保持待核实"
             )
         classified = [
             row for row in matching_code
             if int(row["class_id"]) == expected_class
         ]
         if not classified:
-            actual = sorted({str(row.get("class_name") or row.get("class_id")) for row in matching_code})
+            actual = sorted({document_type_label(int(row["class_id"])) for row in matching_code})
             raise RecoveryEvidenceError(
-                "图号 %s 找到的文档类型不匹配：%s" % (code, "、".join(actual))
+                "图号 %s 的文档类型不符（实际 %s，预期 %s）"
+                % (code, "、".join(actual), document_type_label(expected_class))
             )
 
         target_name = expected_target_filename(row, item)
@@ -275,7 +288,7 @@ class RecoveryVerifier:
                 % "；".join(_candidate_label(candidate) for candidate in candidates[:8])
             )
         candidate = candidates[0]
-        object_id = _positive_int(candidate.get("object_id"), "图纸对象 ID")
+        object_id = _positive_int(candidate.get("object_id"), "CAXA 未返回可核实的文档记录，无法确认上传")
         iterator_no = str(candidate.get("iterator_no") or "").strip()
         if not iterator_no:
             raise RecoveryEvidenceError("CAXA 中该图纸没有可回读的版次")
@@ -318,11 +331,11 @@ class RecoveryVerifier:
                 "待核实流程记录缺少本批文档集合，无法自动核实"
             )
         expected = {
-            _positive_int(value, "计划文档 ID") for value in expected_ids
+            _positive_int(value, "计划文档记录不完整，无法核实流程") for value in expected_ids
         }
         process_id = _positive_int(
             process_instance_id or row.get("remote_id"),
-            "流程实例 ID",
+            "流程实例 ID 必须为正整数",
         )
         info = self.bridge.workflow_info(process_id)
         state = str(info.get("process_state") or "").strip()
@@ -330,11 +343,11 @@ class RecoveryVerifier:
         if not isinstance(observed_ids, list):
             raise RecoveryEvidenceError("流程关联文档回读失败，请保持待核实")
         observed = {
-            _positive_int(value, "流程关联文档 ID") for value in observed_ids
+            _positive_int(value, "流程关联文档回读不完整，请保持待核实") for value in observed_ids
         }
         if state != "2":
             raise RecoveryEvidenceError(
-                "流程当前状态为 %s，不是运行中（2）" % (state or "未知")
+                "CAXA 未确认流程处于运行中，请保持待核实"
             )
         if observed != expected:
             raise RecoveryEvidenceError(
@@ -353,7 +366,7 @@ def recovery_evidence_summary(row: dict, evidence: dict) -> str:
         return "CAXA 已回读：图号 %s，版次 %s，文档类型 %s" % (
             drawing_bundle.normalize_code(row.get("item_code") or row.get("key")),
             evidence.get("iterator_no"),
-            "CappDocument" if int(evidence.get("class_id") or 0) == CLASS_ID_CAPP else "Drawing",
+            document_type_label(int(evidence.get("class_id") or 0)),
         )
     if kind == "relation":
         return "CAXA 已回读：%s ← %s（%s）" % (
@@ -362,7 +375,7 @@ def recovery_evidence_summary(row: dict, evidence: dict) -> str:
             "归属" if evidence.get("link_type") == "own" else "借用",
         )
     if kind == "workflow":
-        return "CAXA 已回读：流程实例 %s，运行中，关联文档 %d 项" % (
+        return "CAXA 已回读：流程实例 ID %s，运行中，关联文档 %d 项" % (
             row.get("remote_id") or "",
             len(evidence.get("linked_document_ids") or []),
         )

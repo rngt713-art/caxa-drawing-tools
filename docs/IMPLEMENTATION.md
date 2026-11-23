@@ -3,6 +3,18 @@
 日期：2026-11-05。实现模型：DeepSeek V4.1 Flash。验收方：Codex。
 工作目录：`E:\codex目录\2026-11-05\b\work\dsh_fix`；`app/` 为可修改副本，原始代码未改。
 
+## 2026-11-21 上传、恢复与发布复审
+
+- 规范文件名保留原选择。PDF 内容变化经确认后才采用检测到的新 SHA-256 和大小，
+  暂存仍按该指纹复核。
+- 恢复窗口先按待核实状态选择任务，只有当前批次身份匹配时才更新清单并自动重试。
+- 已确认流程的文档集合用于计算新增流程的覆盖范围。单独发流程回读缺链时阻止，
+  正常上传的自动补链和 CAXA 2011 兼容回退仍按原有范围工作。
+
+## 2026-11-21 上传清单内编辑系列产品
+
+产品名由树内编辑器按整机图号写入本批所属图纸和工艺文档。清单刷新按整机图号恢复产品行选择，预检和上传生成快照前提交仍打开的编辑器。产品名称仍属于当前上传计划。
+
 ## 1. 范围与约束
 
 - 保持 Tk + Python 编排 + C# helper 子进程架构；不引入云/服务/复杂安全体系。
@@ -479,3 +491,15 @@
 
 用户确认的默认升版和图号唯一边界见 `BUSINESS_REQUIREMENTS.md` §13；
 具体性能测量及使用说明见 `FIXES_AND_PERFORMANCE_20261113.md`。
+
+## 20. 2026-11-23 v1.2.3 构建链
+
+- `build_all.ps1` 统一调用 PowerShell 7（`pwsh`）；`-PlanOnly` 也检查 helper
+  子进程退出码，不再在解析失败时误报完成。
+- `build_helper.ps1` 将 CAXA 引用与 Microsoft framework 引用分开：
+  CAXA 优先使用 `vendor/caxa-2011r3`，`System.Web.Extensions`、WPF UI Automation
+  使用本机 .NET Framework，避免 `CS1703` 重复引用。
+- helper 编译增加 `app/assets/app-icon.ico` 的 Win32 图标资源；上传端由
+  PyInstaller 嵌入同一 ICO/PNG，并在窗口标题栏加载。
+- 发布目录中的 `图纸上传助手.exe` 和 `caxa_helper.exe` 已由当前源码重建；
+  `release/SHA256SUMS.txt` 同步更新。

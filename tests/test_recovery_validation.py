@@ -211,7 +211,6 @@ class RecoveryValidationTests(unittest.TestCase):
 
     def test_ui_no_write_retry_releases_operation_and_starts_upload(self):
         import upload_main
-        self.pending()
         real_factory = journal.TaskJournal
         item = {
             'code': '01.01',
@@ -239,6 +238,14 @@ class RecoveryValidationTests(unittest.TestCase):
             after=Mock(),
             start_upload=Mock(),
         )
+        settings = fake_app._build_settings()
+        self.task = self.j.create_task(
+            digest=upload_main.content_digest(fake_app.bundle, settings),
+            server=settings["ip"],
+            port=settings["port"],
+            user=settings["user"],
+        )["task_id"]
+        self.pending()
         selected = [(
             self.j.get_task(self.task),
             self.j.get_operation(self.task, 'upload', '01.01'),
@@ -257,6 +264,13 @@ class RecoveryValidationTests(unittest.TestCase):
         self.assertEqual(result['status'], journal.OP_FAILED)
         self.assertEqual(item['status'], '待上传')
         fake_app.after.assert_called_once_with(0, fake_app.start_upload)
+
+    def test_pending_tasks_are_filtered_before_recent_task_limit(self):
+        self.pending()
+        for index in range(21):
+            self.j.create_task(digest="new-%d" % index)
+        tasks = self.j.list_tasks_with_pending_operations()
+        self.assertEqual([task["task_id"] for task in tasks], [self.task])
 
     def test_ui_verify_returns_to_event_loop_before_caxa_connect(self):
         import upload_main

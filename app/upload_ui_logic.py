@@ -9,17 +9,20 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 
 import drawing_bundle
 
 DEFAULT_DUPLICATE_POLICY = "append_iteration"
 DUPLICATE_POLICIES = ("append_iteration", "reuse")
 DUPLICATE_POLICY_LABELS = {
-    "append_iteration": "追加新版次",
-    "reuse": "已有则复用",
+    "append_iteration": "升版",
+    "reuse": "复用",
 }
 _DUPLICATE_LABEL_TO_POLICY = {
-    label: policy for policy, label in DUPLICATE_POLICY_LABELS.items()
+    **{label: policy for policy, label in DUPLICATE_POLICY_LABELS.items()},
+    "追加新版次": "append_iteration",
+    "已有则复用": "reuse",
 }
 
 ITEM_DONE = "已上传"
@@ -37,9 +40,9 @@ _RECOVERY_PHASE_LABELS = {
     "upload:attach": "图纸挂接确认",
     "upload:existing_duplicate": "重复对象确认",
     "upload:verify_iteration": "新版次确认",
-    "upload:create_part": "图纸宿主结构创建",
-    "relation": "关系建链",
-    "relation_final_verify": "关系建链回读",
+    "upload:create_part": "创建图纸所属零件",
+    "relation": "建立归属或借用关系",
+    "relation_final_verify": "核实归属或借用关系",
     "workflow": "流程启动",
     "workflow:create": "流程启动",
     "create": "流程启动",
@@ -52,9 +55,63 @@ class SettingsError(ValueError):
     pass
 
 
+def collect_pdf_paths(paths) -> dict:
+    """Collect direct PDFs and PDFs directly inside dropped folders.
+
+    Folder contents are intentionally not traversed recursively.  Folders,
+    nested directories, symlinks and non-PDF files are ignored.
+    """
+    files: list[str] = []
+    seen: set[str] = set()
+    ignored = 0
+    errors: list[str] = []
+
+    def add_pdf(path: str) -> None:
+        absolute = os.path.abspath(path)
+        key = os.path.normcase(absolute)
+        if key not in seen:
+            seen.add(key)
+            files.append(absolute)
+
+    for raw_path in paths or ():
+        try:
+            path = os.path.abspath(os.fspath(raw_path))
+        except (TypeError, ValueError, OSError):
+            ignored += 1
+            continue
+        if os.path.isdir(path):
+            try:
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        try:
+                            is_pdf = (
+                                entry.is_file(follow_symlinks=False)
+                                and entry.name.lower().endswith(".pdf")
+                            )
+                        except OSError:
+                            ignored += 1
+                            continue
+                        if is_pdf:
+                            add_pdf(entry.path)
+                        else:
+                            ignored += 1
+            except OSError as exc:
+                errors.append("%s：%s" % (path, exc))
+            continue
+        if (
+            os.path.isfile(path)
+            and not os.path.islink(path)
+            and path.lower().endswith(".pdf")
+        ):
+            add_pdf(path)
+        else:
+            ignored += 1
+    return {"files": files, "ignored": ignored, "errors": errors}
+
+
 def duplicate_policy_label(value: str | None) -> str:
-    policy = str(value or DEFAULT_DUPLICATE_POLICY)
-    return DUPLICATE_POLICY_LABELS.get(policy, policy)
+    policy = duplicate_policy_value(value)
+    return DUPLICATE_POLICY_LABELS.get(policy, "请选择")
 
 
 def duplicate_policy_value(label_or_value: str | None) -> str:
@@ -87,7 +144,7 @@ def snapshot_settings(
         raise SettingsError("CAXA 端口超出范围")
     policy = duplicate_policy_value(duplicate_policy)
     if policy not in DUPLICATE_POLICIES:
-        raise SettingsError("未知的重复图号策略：%s" % policy)
+        raise SettingsError("请选择重复图号处理方式（升版或复用）")
     return {
         "ip": ip_text,
         "port": port_int,
@@ -525,8 +582,10 @@ def summary_message(result: dict) -> str:
     if result.get("duplicate"):
         workflow = result.get("workflow") or {}
         text = result.get("message") or "相同批次已完成，未重复执行"
-        if workflow.get("process_instance_id"):
-            text += "；原流程 %s" % workflow["process_instance_id"]
+        process_ids = workflow.get("process_instance_ids") or [workflow.get("process_instance_id")]
+        process_labels = "、".join(str(value) for value in process_ids if value)
+        if process_labels:
+            text += "；已有流程 %s" % process_labels
         return text
 
     lines = []
@@ -563,10 +622,12 @@ def summary_message(result: dict) -> str:
         status = workflow.get("status") or ""
         process_id = workflow.get("process_instance_id")
         if process_id:
-            lines.append("流程：%s（流程ID %s）" % (status or "已发起", process_id))
+            lines.append("流程：%s（流程实例 ID %s）" % (status or "已发起", process_id))
         else:
             lines.append("流程：%s %s" % (status, workflow.get("reason") or ""))
-    elif result.get("workflow_blocked"):
+    if result.get("workflow_blocked") and (
+        not workflow or workflow.get("reason") != result["workflow_blocked"]
+    ):
         lines.append("流程：" + str(result["workflow_blocked"]))
 
     failures = [item for item in result.get("items") or [] if item.get("note") and item.get("status") in ("失败", "整机不存在", "失败：图纸已发布，无法追加版次", "部分完成", "待核实")]

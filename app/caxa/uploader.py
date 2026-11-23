@@ -133,6 +133,10 @@ def classify_document(result: dict) -> tuple[int | None, bool]:
     return class_id, class_id is not None
 
 
+def document_type_label(class_id: int | None) -> str:
+    return {CLASS_ID_DRAWING: "图纸", CLASS_ID_CAPP: "工艺文档"}.get(class_id, "未知")
+
+
 def expected_class_id(kind: str, drawing_type: int) -> int:
     if drawing_type == DRAWING_CAPP or kind == "process_doc":
         return CLASS_ID_CAPP
@@ -141,12 +145,14 @@ def expected_class_id(kind: str, drawing_type: int) -> int:
 
 class CaxaUploader:
     def __init__(self, bridge: CaxaBridge, log=print, on_duplicate: str = "append_iteration",
-                 staging_dir: staging.TaskStaging | None = None, auto_confirm: str = ""):
+                 staging_dir: staging.TaskStaging | None = None, auto_confirm: str = "",
+                 before_attach=None):
         self.bridge = bridge
         self.log = log
         self.on_duplicate = on_duplicate
         self.staging = staging_dir
         self.auto_confirm = auto_confirm or ""
+        self.before_attach = before_attach
         self.borrow_actions = []  # [{machine, code, link_type, status, note}]
         self._owns_staging = False
         self._general_product = None
@@ -193,7 +199,7 @@ class CaxaUploader:
             return product
         if len(low_items) > 1:
             raise CaxaError(
-                "图号 %s 存在 %d 个 Product；为避免重复挂接，请先人工清理重复对象"
+                "图号 %s 对应 %d 个产品，请先人工清理重复产品"
                 % (identity, len(low_items)),
                 stage="product_identity_duplicate",
             )
@@ -318,9 +324,9 @@ class CaxaUploader:
                     return product
                 if len(in_folder) > 1:
                     raise CaxaError(
-                        "系列产品名称 %s 在目录 %s 中存在 %d 个 Product；"
+                        "系列目录 %s 有 %d 个产品使用名称 %s；"
                         "请先人工清理重复对象"
-                        % (name, folder_name, len(in_folder)),
+                        % (folder_name, len(in_folder), name),
                         stage="product_series_duplicate",
                     )
 
@@ -330,9 +336,9 @@ class CaxaUploader:
             self._product_cache[name.upper()] = dict(product)
             return product
         raise CaxaError(
-            "系列产品名称 %s 存在 %d 个 Product，且无法按目录 %s 唯一确定；"
+            "有 %d 个产品使用名称 %s，无法从系列目录 %s 唯一确定；"
             "请先人工清理重复对象"
-            % (name, len(candidates), folder_name or "未指定"),
+            % (len(candidates), name, folder_name or "未指定"),
             stage="product_series_duplicate",
         )
 
@@ -524,7 +530,7 @@ class CaxaUploader:
                 product = self.find_product(GENERAL_PARTS_PRODUCT_NAME)
             if product is None:
                 raise CaxaError(
-                    "CAXA 中找不到通用件产品（identity=%s / name=%s）"
+                    "CAXA 中找不到通用件产品（代号 %s，名称 %s）"
                     % (
                         GENERAL_PARTS_PRODUCT_IDENTITY,
                         GENERAL_PARTS_PRODUCT_NAME,
@@ -546,7 +552,7 @@ class CaxaUploader:
         product = self.find_product("02")
         if product is None:
             raise CaxaError(
-                "CAXA 中找不到 Product 02 半成品，未创建 02 层级",
+                "CAXA 中找不到产品「02 半成品」，未创建 02 层级",
                 stage="half_product_group",
             )
 
@@ -592,7 +598,7 @@ class CaxaUploader:
                 )
             if parent_part is None:
                 raise CaxaError(
-                    "02 半成品 %s 找不到已存在的点号上级 Part；"
+                    "02 半成品 %s 找不到图号层级中已存在的上级零件；"
                     "请先建立上级层级，助手只自动建立末级 %s"
                     % (machine, machine),
                     stage="half_product_group",
@@ -607,7 +613,7 @@ class CaxaUploader:
             )
         elif group != machine and parent_part is None:
             raise CaxaError(
-                "02 半成品 %s 找不到已存在的点号上级 Part"
+                "02 半成品 %s 找不到图号层级中已存在的上级零件"
                 % machine,
                 stage="half_product_group",
             )
@@ -657,7 +663,7 @@ class CaxaUploader:
                 )
             if own_products:
                 raise CaxaError(
-                    "02 半成品 %s 当前是 Product 直属归属，不是 %s 下的"
+                    "02 半成品 %s 直接归属产品，不是 %s 下的"
                     "点号层级，请先人工修正"
                     % (machine, parent_identity),
                     stage="half_product_parent",
@@ -775,6 +781,20 @@ class CaxaUploader:
             if "发布" in state_text:
                 raise PublishedDrawingError(existing_dr.get("name") or name or draw_no)
 
+        # Persist the old version before sending the write. A timeout (or
+        # process exit) cannot return this evidence from the helper.
+        if self.before_attach is not None:
+            baseline = {
+                "target_filename": name,
+                "append_iteration": (
+                    existing_dr is not None and effective_dup == "append_iteration"
+                ),
+            }
+            if baseline["append_iteration"]:
+                baseline["before_iterator_no"] = existing_dr.get("iterator_no")
+                baseline["before_history_count"] = existing_dr.get("history_count")
+            self.before_attach(draw_no, baseline)
+
         # Auto-confirm is enabled for exactly this upload command only, and the
         # helper further restricts it to windows owned by its own process while
         # the upload call is active.
@@ -814,7 +834,7 @@ class CaxaUploader:
         if not r.get("attached"):
             # The helper may have written before returning attached=false.
             raise UnverifiedResult(
-                "图纸挂接未确认：helper 返回 attached=false（可能已写入）",
+                "CAXA 未确认文档挂接结果，可能已写入，请核实",
                 stage="upload_verify",
                 result=dict(r),
                 partial=bool(r.get("object_id")),
@@ -916,10 +936,7 @@ class CaxaUploader:
         if not r["class_verified"]:
             raise UnverifiedResult(
                 "上传返回的文档类型不是预期类型（实际 %s / 期望 %s）"
-                % (
-                    r.get("class_name") or r.get("low_class") or r.get("class_id") or "未知",
-                    "Drawing" if expected == CLASS_ID_DRAWING else "CappDocument",
-                ),
+                % (document_type_label(class_id), document_type_label(expected)),
                 stage="upload_verify",
                 result=r,
             )
@@ -928,14 +945,13 @@ class CaxaUploader:
         if r.get("reused"):
             extra.append("复用已有文档")
         if r.get("new_version"):
-            extra.append("新增版本（迭代）")
+            extra.append("追加新版次")
         if (r.get("diag") or {}).get("append_iteration_requested") and not r.get("reused"):
             extra.append("重复框确认追加新版次")
-        if r.get("method"):
-            extra.append("方式 " + str(r.get("method")))
-        self.log("  挂接成功（文档类 %s%s）" % (
-            r.get("class_name") or r.get("low_class") or "?",
-            ("，" + "，".join(extra)) if extra else ""))
+        self.log("  %s挂接成功%s" % (
+            document_type_label(class_id),
+            ("（" + "，".join(extra) + "）") if extra else "",
+        ))
         return r
 
     # ---------- business orchestration ----------
@@ -1113,7 +1129,7 @@ class CaxaUploader:
                     draw_no=code,
                     kind=kind,
                 )
-                caxa_path = "Product 02 半成品 → Part %s → 工艺文档 %s" % (
+                caxa_path = "产品「02 半成品」→ 零件 %s → 工艺文档 %s" % (
                     machine,
                     file_name,
                 )
@@ -1209,7 +1225,7 @@ class CaxaUploader:
                 "target": "半成品 %s 图纸" % code,
                 "file_name": file_name,
                 "caxa_path": (
-                    "Product 02 半成品 → 半成品 %s → 文档 %s"
+                    "产品「02 半成品」→ 半成品 %s → 图纸 %s"
                     % (code, file_name)
                 ),
                 "created_new_part": bool(part.get("created_new_part")),
@@ -1278,7 +1294,7 @@ class CaxaUploader:
                     )
                     if product is None:
                         raise CaxaError(
-                            "CAXA 中找不到 Product 02 半成品",
+                            "CAXA 中找不到产品「02 半成品」",
                             stage="product_owner",
                         )
                     self.link_part(
@@ -1357,59 +1373,73 @@ class CaxaUploader:
             return None
         return bool(value)
 
-    def _child_link_state(self, parent_id, child_id) -> tuple[bool, bool | None]:
-        """Return (exists, reference) or raise CaxaError when it is unknown.
-
-        ``part_info`` exposes both ``children`` and ``link_endpoints``; either
-        can be incomplete.  A reported ``children_error`` without usable
-        endpoint evidence means UNKNOWN - never "no link".
-        """
-        info = self.part_info(parent_id)
-        children = info.get("children")
-        endpoints = info.get("link_endpoints") or []
-        children_error = info.get("children_error")
-        matched_reference = None
-        matched = False
-        for child in children or []:
-            candidate = (
-                child.get("sub_id")
-                if child.get("sub_id") is not None
-                else child.get("sub_object_id")
-            )
-            if candidate is None:
-                role = child.get("roleB") or {}
-                candidate = role.get("object_id")
-            if candidate is None:
-                continue
+    def _relation_children(self, parent_id: int, info: dict) -> tuple[dict[int, bool | None], str]:
+        """Read positive links from either API and use complete lists for absence."""
+        endpoint_states = {}
+        endpoints = info.get("link_endpoints")
+        endpoints_complete = (
+            isinstance(endpoints, list)
+            and not info.get("link_endpoints_error")
+            and not info.get("link_endpoints_session")
+        )
+        for endpoint in endpoints if isinstance(endpoints, list) else ():
             try:
-                if int(candidate) != int(child_id):
-                    continue
-            except (TypeError, ValueError):
+                source_id = int(endpoint["roleA"]["object_id"])
+                child_id = int(endpoint["roleB"]["object_id"])
+                if source_id != parent_id or child_id <= 0 or endpoint.get("link_error"):
+                    raise ValueError("unresolved link")
+            except (KeyError, TypeError, ValueError):
+                endpoints_complete = False
                 continue
-            matched = True
-            matched_reference = self._as_bool(child.get("reference"))
-            break
-        if not matched:
-            for endpoint in endpoints or []:
-                role_a = endpoint.get("roleA") or {}
-                role_b = endpoint.get("roleB") or {}
-                ids = [role_a.get("object_id"), role_b.get("object_id")]
-                try:
-                    if int(child_id) not in {int(v) for v in ids if v is not None}:
-                        continue
-                except (TypeError, ValueError):
-                    continue
-                matched = True
-                matched_reference = self._as_bool(endpoint.get("reference"))
-                break
-        if matched:
-            return True, matched_reference
-        if children_error:
+            endpoint_states[child_id] = self._as_bool(endpoint.get("reference"))
+
+        high_states = {}
+        children = info.get("children")
+        children_complete = isinstance(children, list) and not info.get("children_error")
+        for child in children if isinstance(children, list) else ():
+            try:
+                candidate = child.get("sub_id") or child.get("sub_object_id")
+                if not candidate:
+                    candidate = child["roleB"]["object_id"]
+                child_id = int(candidate)
+                if child_id <= 0:
+                    raise ValueError("unresolved child")
+            except (AttributeError, KeyError, TypeError, ValueError):
+                children_complete = False
+                continue
+            high_states[child_id] = self._as_bool(child.get("reference"))
+
+        states = dict(endpoint_states)
+        for child_id, reference in high_states.items():
+            if child_id not in states or states[child_id] is None:
+                states[child_id] = reference
+            elif reference is not None and states[child_id] != reference:
+                states[child_id] = None
+
+        # The low-level pass can account for rows that had no RefSubPart
+        # pointer. The complete count from the high-level pass proves coverage.
+        low_covers_children = (
+            endpoints_complete and isinstance(children, list) and not info.get("children_error")
+            and len(endpoints) == len(children)
+        )
+        if info.get("refresh_error"):
+            return states, str(info["refresh_error"])
+        if children_complete or low_covers_children:
+            return states, ""
+        error = info.get("children_error") or info.get("link_endpoints_error")
+        return states, str(error or "子件列表缺失或含无法识别的关系端点")
+
+    def _child_link_state(self, parent_id, child_id) -> tuple[bool, bool | None]:
+        """Return (exists, reference) or raise when absence cannot be confirmed."""
+        parent_id = int(parent_id)
+        child_id = int(child_id)
+        states, error = self._relation_children(parent_id, self.part_info(parent_id))
+        if child_id in states:
+            return True, states[child_id]
+        if error:
             raise CaxaError(
-                "无法确认 %s 的现有子件关系（part_info children 失败：%s）"
-                % (parent_id, children_error),
+                "无法确认现有子件关系（%s）" % error,
                 stage="part_info",
-                result={"part_info": {"children_error": children_error}},
             )
         return False, None
 
@@ -1473,39 +1503,9 @@ class CaxaUploader:
                 except CaxaError as exc:
                     parent_errors[parent_id] = str(exc)
                 else:
-                    states: dict[int, bool | None] = {}
-                    if info.get("children_error"):
-                        incomplete_parents[parent_id] = str(info["children_error"])
-                    for endpoint in info.get("link_endpoints") or []:
-                        role_a = endpoint.get("roleA") or {}
-                        role_b = endpoint.get("roleB") or {}
-                        try:
-                            if int(role_a.get("object_id")) != parent_id:
-                                continue
-                            linked_child = int(role_b.get("object_id"))
-                        except (TypeError, ValueError):
-                            continue
-                        states[linked_child] = self._as_bool(
-                            endpoint.get("reference")
-                        )
-                    for child_row in info.get("children") or []:
-                        candidate = (
-                            child_row.get("sub_id")
-                            if child_row.get("sub_id") is not None
-                            else child_row.get("sub_object_id")
-                        )
-                        if candidate is None:
-                            candidate = (
-                                (child_row.get("roleB") or {}).get("object_id")
-                            )
-                        try:
-                            linked_child = int(candidate)
-                        except (TypeError, ValueError):
-                            continue
-                        states.setdefault(
-                            linked_child,
-                            self._as_bool(child_row.get("reference")),
-                        )
+                    states, error = self._relation_children(parent_id, info)
+                    if error:
+                        incomplete_parents[parent_id] = error
                     parent_states[parent_id] = states
             if parent_id in parent_errors:
                 issues.append(
@@ -1525,7 +1525,7 @@ class CaxaUploader:
                                    else "missing_link"),
                         "note": ("子件关系回读不完整：" + incomplete_parents[parent_id]
                                  if parent_id in incomplete_parents
-                                 else "最终回读未找到该借用关系"),
+                                 else "最终回读未找到该归属或借用关系"),
                     }
                 )
                 continue
@@ -1589,7 +1589,13 @@ class CaxaUploader:
 
         parent_id = parent.get("object_id") or parent.get("part_id")
         child_id = child.get("object_id") or child.get("part_id")
-        exists, current_reference = self._child_link_state(parent_id, child_id)
+        try:
+            exists, current_reference = self._child_link_state(parent_id, child_id)
+        except CaxaError as exc:
+            raise CaxaError(
+                "建立关系前回读失败，未写入 %s ← %s：%s" % (parent_code, child_code, exc),
+                stage="part_info",
+            ) from exc
         if exists:
             if current_reference is None:
                 row["status"] = "待核实"
@@ -1597,8 +1603,8 @@ class CaxaUploader:
             elif current_reference != is_reference:
                 row["status"] = "冲突"
                 row["note"] = (
-                    "已存在其他类型的链接（当前 reference=%s，请求 reference=%s），未自动改写"
-                    % (current_reference, is_reference)
+                    "关系类型不一致：当前为%s，计划为%s。保留现有关系"
+                    % ("借用" if current_reference else "归属", "借用" if is_reference else "归属")
                 )
             else:
                 row["status"] = "已存在"
@@ -1634,8 +1640,9 @@ class CaxaUploader:
             return row
         if reference_after != is_reference:
             row["status"] = "待核实"
-            row["note"] = "回读的链接类型为 reference=%s，与请求 %s 不一致" % (
-                reference_after, is_reference,
+            row["note"] = "关系类型不一致：回读为%s，计划为%s" % (
+                "借用" if reference_after else "归属",
+                "借用" if is_reference else "归属",
             )
             return row
         row["status"] = "已归属" if link_type == "own" else "已借用"

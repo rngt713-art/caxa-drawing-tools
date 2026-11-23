@@ -22,6 +22,12 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
+
+def resource_path(relative: str) -> str:
+    base = getattr(sys, "_MEIPASS", APP_DIR)
+    return os.path.join(base, relative)
+
+
 import config  # noqa: E402
 import drawing_bundle  # noqa: E402
 import journal as journal_module  # noqa: E402
@@ -29,6 +35,7 @@ import upload_ui_logic as ui_logic  # noqa: E402
 from upload_core import (  # noqa: E402
     apply_manual_borrows,
     collect_machine_targets,
+    content_digest,
     precheck_with_caxa,
     preview_bundle,
     upload_bundle,
@@ -42,17 +49,9 @@ import update_checker  # noqa: E402
 from version import __version__  # noqa: E402
 
 
-KIND_LABEL = {
-    "process_doc": "工艺文档",
-    "machine_drawing": "整机图纸",
-    "component": "组件图纸",
-    "unknown": "未知",
-}
-
-LINK_TYPE_LABEL = {
-    "own": "归属父级 (reference=False)",
-    "borrow": "借用父级 (reference=True)",
-}
+KIND_LABEL = drawing_bundle.ITEM_KIND_LABELS
+KIND_VALUE = {label: kind for kind, label in KIND_LABEL.items()}
+LINK_TYPE_LABEL = {"own": "归属", "borrow": "借用"}
 
 SOURCE_LABEL = {
     "drag": "本批拖拽",
@@ -60,8 +59,8 @@ SOURCE_LABEL = {
     "manual": "手工指定",
     "z03_bom": "Z03明细表",
 }
-UPLOAD_COLUMN = "#7"
-UPGRADE_ONLY_COLUMN = "#8"
+UPLOAD_COLUMN = "upload_sel"
+UPGRADE_ONLY_COLUMN = "upgrade_only"
 
 
 class PlaceholderEntry(ttk.Entry):
@@ -341,16 +340,14 @@ class UploadApp(TkinterDnD.Tk):
         self._drag_target_row = ""
         self._drag_ghost = None
         self._inline_editor = None
-        self._inline_row = ""
+        self._inline_target = ""
         self._inline_mode = ""
         self._tree_items = {}
         self._tree_relations = {}
         self._tree_codes = {}
         self._tree_product_groups = {}
         self._tree_product_nodes = {}
-        self._series_product_code = ""
         self._series_product_required_codes: set[str] = set()
-        self._syncing_series_product = False
         self._batch_id = ""
         self.update_state = None
         self._available_update = None
@@ -359,216 +356,248 @@ class UploadApp(TkinterDnD.Tk):
         self._update_busy_label = ""
         self._update_after_id = None
         self._build_ui()
+        self._apply_window_icon()
         self._init_update_state()
         self.drop_target_register(DND_FILES)
         self.dnd_bind("<<Drop>>", self._on_drop)
         self._poll_after_id = self.after(150, self._poll_events)
 
+    def _apply_window_icon(self):
+        icon = resource_path(os.path.join("assets", "app-icon.ico"))
+        try:
+            self.iconbitmap(icon)
+            return
+        except (OSError, tk.TclError):
+            pass
+        try:
+            image = tk.PhotoImage(file=resource_path(os.path.join("assets", "app-icon.png")))
+            self.iconphoto(True, image.subsample(8), image.subsample(16))
+        except (OSError, tk.TclError):
+            self.log("窗口图标加载失败：%s" % icon)
+
     def _build_ui(self):
-        top = ttk.Frame(self, padding=8)
-        top.pack(fill="x")
-        self.top_frame = top
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("Workspace.TFrame", background="#edf2f8")
+        style.configure("Panel.TFrame", background="#ffffff")
+        style.configure("Panel.TLabel", background="#ffffff", foreground="#182d44")
+        style.configure(
+            "Title.TLabel", background="#ffffff", foreground="#142c49",
+            font=("Segoe UI", 16, "bold"),
+        )
+        style.configure("Source.TLabel", background="#ffffff", foreground="#495e74")
+        style.configure(
+            "Toolbar.TButton", padding=(10, 6), foreground="#182d44",
+            background="#f2f6fa", bordercolor="#c5d2df", lightcolor="#f2f6fa",
+            darkcolor="#f2f6fa",
+        )
+        style.map(
+            "Toolbar.TButton",
+            background=[("disabled", "#edf0f4"), ("pressed", "#d7e6f1"), ("active", "#e3eef6")],
+            foreground=[("disabled", "#52677d")],
+        )
+        style.configure(
+            "Upload.TButton", padding=(14, 6), foreground="#ffffff",
+            background="#00668a", bordercolor="#00668a", lightcolor="#00668a",
+            darkcolor="#00668a",
+        )
+        style.map(
+            "Upload.TButton",
+            background=[("disabled", "#d8e3ed"), ("pressed", "#004a64"), ("active", "#005775")],
+            foreground=[("disabled", "#52677d"), ("!disabled", "#ffffff")],
+        )
+        style.configure("Panel.TCheckbutton", background="#ffffff")
+        style.configure(
+            "Drawings.Treeview", background="#ffffff", fieldbackground="#ffffff",
+            foreground="#182d44", rowheight=28,
+        )
+        style.configure(
+            "Drawings.Treeview.Heading", background="#e6edf5", foreground="#182d44",
+            padding=(6, 5), bordercolor="#c5d2df", lightcolor="#e6edf5", darkcolor="#e6edf5",
+        )
+        style.map(
+            "Drawings.Treeview",
+            background=[("selected", "#cce7f5")],
+            foreground=[("selected", "#122d46")],
+        )
 
-        ttk.Button(top, text="打开上传包", command=self.open_bundle).grid(
-            row=0, column=0, padx=(0, 8), sticky="w"
-        )
-        ttk.Button(top, text="打开上传包目录", command=self.open_bundle_dir).grid(
-            row=0, column=1, padx=(0, 8), sticky="w"
-        )
-        self.bundle_var = tk.StringVar(value="未打开上传包")
-        ttk.Label(top, textvariable=self.bundle_var).grid(
-            row=0, column=2, columnspan=6, sticky="w"
-        )
+        workspace = ttk.Frame(self, padding=12, style="Workspace.TFrame")
+        workspace.pack(fill="both", expand=True)
+        self.top_frame = ttk.Frame(workspace, style="Panel.TFrame")
+        self.top_frame.pack(fill="x")
+        self.action_buttons = []
 
-        ttk.Label(top, text="CAXA IP").grid(row=1, column=0, sticky="e", pady=3)
+        header = ttk.Frame(self.top_frame, style="Panel.TFrame", padding=(14, 12, 14, 4))
+        header.pack(fill="x")
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="图纸上传", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        self.bundle_var = tk.StringVar(value="未导入图纸")
+        source = ttk.Label(header, textvariable=self.bundle_var, style="Source.TLabel", width=1)
+        source.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(3, 0))
+        source.bind("<Configure>", lambda event: source.configure(wraplength=event.width))
+        self.settings_button = ttk.Button(
+            header, style="Toolbar.TButton", command=self._toggle_settings
+        )
+        self.settings_button.grid(row=0, column=1, padx=(0, 6))
+        self.update_button = ttk.Button(
+            header, text="检查更新", style="Toolbar.TButton", command=self.on_update_button
+        )
+        self.update_button.grid(row=0, column=2)
+        self.action_buttons.append(self.update_button)
+
+        self.toolbar = ttk.Frame(self.top_frame, style="Panel.TFrame", padding=(14, 8, 14, 12))
+        self.toolbar.pack(fill="x")
+        for text, command in (
+            ("打开上传包…", self.open_bundle),
+            ("打开上传包目录…", self.open_bundle_dir),
+            ("添加图纸…", self.add_pdfs),
+            ("添加文件夹…", self.add_pdf_folder),
+        ):
+            button = ttk.Button(self.toolbar, text=text, command=command, style="Toolbar.TButton")
+            button.pack(side="left", padx=(0, 6))
+            self.action_buttons.append(button)
+
+        self.upload_button = ttk.Button(
+            self.toolbar, text="开始上传", command=self.start_upload, style="Upload.TButton"
+        )
+        self.upload_button.pack(side="right")
+        self.action_buttons.append(self.upload_button)
+        precheck = ttk.Button(
+            self.toolbar, text="规范并预检", command=self.normalize_and_precheck,
+            style="Toolbar.TButton",
+        )
+        precheck.pack(side="right", padx=(8, 8))
+        self.action_buttons.append(precheck)
+
+        self._build_connection_settings()
+        if not self.ip_var.get().strip() or not self.user_var.get().strip():
+            self._toggle_settings()
+
+        footer = ttk.Frame(workspace, style="Panel.TFrame")
+        footer.pack(side="bottom", fill="x")
+        self._build_status_panel(footer)
+
+        work_area = ttk.Frame(workspace, style="Panel.TFrame", padding=12)
+        work_area.pack(fill="both", expand=True, pady=(10, 8))
+        actions = ttk.Frame(work_area, style="Panel.TFrame")
+        actions.pack(fill="x", pady=(0, 8))
+        ttk.Label(actions, text="上传清单", style="Title.TLabel").pack(side="left", padx=(0, 12))
+        for text, command in (
+            ("借用已有零件", self.add_relation_dialog),
+            ("切换归属 / 借用", self.toggle_selected_relation_type),
+            ("移除计划关系", self.delete_selected_relation),
+        ):
+            button = ttk.Button(actions, text=text, command=command)
+            button.pack(side="left", padx=(0, 6))
+            self.action_buttons.append(button)
+        for text, command in (
+            ("核实待定结果", self.recover_pending),
+            ("发起审核打印", self.start_workflow_only),
+        ):
+            button = ttk.Button(actions, text=text, command=command)
+            button.pack(side="right", padx=(6, 0))
+            self.action_buttons.append(button)
+
+        self._build_drawing_tree(work_area)
+        self.update_idletasks()
+        min_width = max(900, self.toolbar.winfo_reqwidth() + 24, actions.winfo_reqwidth() + 48)
+        min_height = max(540, round(405 * float(self.tk.call("tk", "scaling"))))
+        self.minsize(min_width, min_height)
+        self.dnd_bind("<<DropEnter>>", self._on_drop_hover, add="+")
+        self.dnd_bind("<<DropPosition>>", self._on_drop_hover, add="+")
+        self.dnd_bind("<<DropLeave>>", lambda _event: self._set_drag_target(""), add="+")
+
+    def _build_connection_settings(self):
+        settings = ttk.Frame(self.top_frame, style="Panel.TFrame", padding=(14, 2, 14, 12))
+        self.settings_frame = settings
+        self.settings_button.configure(text="展开连接与流程设置")
+
         self.ip_var = tk.StringVar(value=str(self.cfg.get("caxa_server_ip") or ""))
-        ttk.Entry(top, textvariable=self.ip_var, width=18).grid(
-            row=1, column=1, sticky="w", pady=3
-        )
-        ttk.Label(top, text="端口").grid(row=1, column=2, sticky="e", padx=(10, 2))
         self.port_var = tk.StringVar(value=str(self.cfg.get("caxa_server_port") or "8900"))
-        ttk.Entry(top, textvariable=self.port_var, width=8).grid(
-            row=1, column=3, sticky="w", pady=3
-        )
-        ttk.Label(top, text="用户名").grid(row=1, column=4, sticky="e", padx=(10, 2))
         self.user_var = tk.StringVar(value=str(self.cfg.get("caxa_user") or ""))
-        ttk.Entry(top, textvariable=self.user_var, width=18).grid(
-            row=1, column=5, sticky="w", pady=3
-        )
-        ttk.Label(top, text="密码").grid(row=1, column=6, sticky="e", padx=(10, 2))
         self.password_var = tk.StringVar(value=config.get_password(self.cfg))
-        ttk.Entry(top, textvariable=self.password_var, show="*", width=18).grid(
-            row=1, column=7, sticky="w", pady=3
-        )
-
-        ttk.Label(top, text="重复图号").grid(
-            row=2, column=0, sticky="e", pady=3
-        )
-        self.duplicate_var = tk.StringVar(
-            value=ui_logic.duplicate_policy_label(
-                self.cfg.get("duplicate_policy")
+        self.performer_var = tk.StringVar(value=str(self.cfg.get("workflow_performer") or ""))
+        for column, (label, variable, mask) in enumerate(
+            (
+                ("CAXA 服务器地址", self.ip_var, ""),
+                ("端口", self.port_var, ""),
+                ("用户名", self.user_var, ""),
+                ("密码（可留空）", self.password_var, "*"),
+                ("审核人", self.performer_var, ""),
             )
+        ):
+            settings.columnconfigure(column, weight=1, uniform="settings")
+            ttk.Label(settings, text=label, style="Panel.TLabel").grid(
+                row=0, column=column, sticky="w", padx=(0, 10)
+            )
+            ttk.Entry(settings, textvariable=variable, show=mask, width=12).grid(
+                row=1, column=column, sticky="ew", padx=(0, 10), pady=(3, 8)
+            )
+
+        self.duplicate_var = tk.StringVar(
+            value=ui_logic.duplicate_policy_label(self.cfg.get("duplicate_policy"))
+        )
+        ttk.Label(settings, text="重复图号处理", style="Panel.TLabel").grid(
+            row=2, column=0, sticky="w"
         )
         self.duplicate_combo = ttk.Combobox(
-            top,
-            textvariable=self.duplicate_var,
-            state="readonly",
-            width=18,
+            settings, textvariable=self.duplicate_var, state="readonly", width=12,
             values=tuple(ui_logic.DUPLICATE_POLICY_LABELS.values()),
         )
-        self.duplicate_combo.grid(
-            row=2, column=1, columnspan=2, sticky="w", pady=3
-        )
+        self.duplicate_combo.grid(row=2, column=1, sticky="ew", padx=(0, 10))
+        ttk.Label(
+            settings, style="Source.TLabel",
+            text="升版会为已有图纸追加版次。复用会沿用已有图纸。",
+        ).grid(row=3, column=0, columnspan=5, sticky="w", pady=(5, 0))
 
         self.workflow_var = tk.BooleanVar(
             value=bool(self.cfg.get("start_workflow_after_upload", False))
         )
         ttk.Checkbutton(
-            top,
-            text="上传成功后发起“审核打印”流程",
-            variable=self.workflow_var,
-        ).grid(row=2, column=3, columnspan=3, sticky="w")
-        ttk.Label(top, text="审核人").grid(row=2, column=6, sticky="e")
-        self.performer_var = tk.StringVar(
-            value=str(self.cfg.get("workflow_performer") or "")
-        )
-        ttk.Entry(top, textvariable=self.performer_var, width=18).grid(
-            row=2, column=7, sticky="w"
-        )
+            settings, text="上传成功后发起“审核打印”流程", variable=self.workflow_var,
+            style="Panel.TCheckbutton",
+        ).grid(row=2, column=2, columnspan=3, sticky="w")
 
-        style = ttk.Style(self)
-        style.configure("Required.TEntry", fieldbackground="#ffd6d6")
-        self.series_product_label_var = tk.StringVar(
-            value="03系列产品名称（先选中03整机）"
-        )
-        ttk.Label(
-            top, textvariable=self.series_product_label_var
-        ).grid(row=3, column=0, sticky="e", pady=3)
-        self.series_product_var = tk.StringVar()
-        self.series_product_entry = ttk.Entry(
-            top, textvariable=self.series_product_var, width=32
-        )
-        self.series_product_entry.grid(
-            row=3, column=1, columnspan=3, sticky="w", pady=3
-        )
-        self.series_product_entry.configure(state="disabled")
-        self.series_product_var.trace_add(
-            "write", lambda *_args: self._on_series_product_name_changed()
-        )
-        self.series_product_entry.bind(
-            "<FocusOut>", lambda _event: self._commit_series_product_name()
-        )
-        self.series_product_entry.bind(
-            "<Return>", lambda _event: self._commit_series_product_name()
-        )
-        ttk.Label(
-            top,
-            text="选中一台03整机后填写；默认允许留空，预检缺失整机产品时变为必填。",
-        ).grid(row=3, column=4, columnspan=4, sticky="w", padx=(10, 0))
+    def _toggle_settings(self):
+        if self.settings_frame.winfo_manager():
+            self.settings_frame.pack_forget()
+            self.settings_button.configure(text="展开连接与流程设置")
+        else:
+            self.settings_frame.pack(fill="x", after=self.toolbar)
+            self.settings_button.configure(text="收起连接与流程设置")
 
-        buttons = ttk.Frame(top)
-        buttons.grid(row=4, column=0, columnspan=8, sticky="w", pady=(8, 0))
-        self.action_buttons = []
-        self.action_buttons.append(
-            ttk.Button(buttons, text="添加/拖入PDF", command=self.add_pdfs)
-        )
-        self.action_buttons[-1].pack(side="left", padx=(0, 6))
-        self.upload_button = ttk.Button(
-            buttons, text="上传图纸", command=self.start_upload
-        )
-        self.upload_button.pack(side="left")
-        for text, command in (
-            ("一键规范文件名", self.normalize_filenames),
-            ("检查上传包/设计树预检", self.check_bundle),
-            ("执行手动借用", self.start_manual_borrow),
-            ("发起流程", self.start_workflow_only),
-            ("核实待定结果", self.recover_pending),
-            ("清空日志", self.clear_log),
-        ):
-            button = ttk.Button(buttons, text=text, command=command)
-            button.pack(side="left", padx=6)
-            self.action_buttons.append(button)
-        self.update_button = ttk.Button(
-            buttons, text="检查更新", command=self.on_update_button
-        )
-        self.update_button.pack(side="left", padx=6)
-        self.action_buttons.append(self.update_button)
-        ttk.Label(
-            top,
-            text="数字图号需“图号 名称.pdf”，单字母工艺（Z03/M03/T03/J03/P03）为“图号.pdf”（不带中文名）",
-            wraplength=980,
-        ).grid(row=5, column=0, columnspan=8, sticky="w", pady=(4, 0))
-
-        work_area = ttk.Frame(self)
-        work_area.pack(fill="both", expand=True, padx=8, pady=(8, 4))
-        relation_actions = ttk.Frame(work_area)
-        relation_actions.pack(fill="x", pady=(0, 5))
-        for text, command in (
-            ("增加次级条目", lambda: self.add_relation_dialog()),
-            ("切换 归属子件 / 借用", self.toggle_selected_relation_type),
-            ("删除选中关系", self.delete_selected_relation),
-        ):
-            button = ttk.Button(relation_actions, text=text, command=command)
-            button.pack(side="left", padx=(0, 6))
-            self.action_buttons.append(button)
-        ttk.Label(
-            relation_actions,
-            text=(
-                "可按住 Ctrl/Shift 多选后拖到上级条目；拖到新的归属上级会替换原归属，"
-                "每个子图只保留一个归属上级，可同时存在多个借用上级。"
-            ),
-        ).pack(side="left", padx=8)
-
+    def _build_drawing_tree(self, parent):
         columns = (
-            "source",
-            "page",
-            "kind",
-            "machine",
-            "relation",
-            "filename_state",
-            "upload_sel",
-            "upgrade_only",
-            "status",
-            "note",
+            "source", "page", "kind", "machine", "relation", "filename_state",
+            "upload_sel", "upgrade_only", "status", "note",
         )
-        tree_frame = ttk.Frame(work_area)
+        tree_frame = ttk.Frame(parent, style="Panel.TFrame")
         tree_frame.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(
-            tree_frame, columns=columns, show="tree headings", height=18
+            tree_frame, columns=columns, show="tree headings", height=12,
+            displaycolumns=(
+                "upload_sel", "upgrade_only", "relation", "filename_state", "status",
+                "note", "kind", "machine", "source", "page",
+            ),
+            style="Drawings.Treeview",
         )
-        headers = {
-            "#0": "图纸（图号 名称）",
-            "source": "来源文件",
-            "page": "页",
-            "kind": "类型",
-            "machine": "成品代码",
-            "relation": "关系",
-            "filename_state": "命名",
-            "upload_sel": "上传",
-            "upgrade_only": "只升版",
-            "status": "状态",
-            "note": "结果/备注",
-        }
-        widths = {
-            "#0": 360,
-            "source": 150,
-            "page": 40,
-            "kind": 80,
-            "machine": 130,
-            "relation": 150,
-            "filename_state": 60,
-            "upload_sel": 45,
-            "upgrade_only": 70,
-            "status": 120,
-            "note": 220,
-        }
-        for column in columns:
-            self.tree.heading(column, text=headers[column])
-            self.tree.column(column, width=widths[column], anchor="w")
-        self.tree.heading("#0", text=headers["#0"])
-        self.tree.column("#0", width=widths["#0"], anchor="w", minwidth=240)
-        self.tree.tag_configure("invalid", foreground="#b00020")
-        self.tree.tag_configure("drop_target", background="#cfe8ff")
+        for column, title, width in (
+            ("#0", "图纸（图号 名称）", 292),
+            ("source", "来源文件", 160),
+            ("page", "页", 44),
+            ("kind", "文档类型", 112),
+            ("machine", "所属图号", 140),
+            ("relation", "关系", 145),
+            ("filename_state", "命名", 68),
+            ("upload_sel", "上传", 50),
+            ("upgrade_only", "借用处理", 102),
+            ("status", "状态", 128),
+            ("note", "结果 / 备注", 230),
+        ):
+            self.tree.heading(column, text=title, anchor="w")
+            self.tree.column(column, width=width, minwidth=min(width, 100), stretch=False)
+        self.tree.tag_configure("invalid", foreground="#a51232")
+        self.tree.tag_configure("drop_target", background="#d4effb")
         self.tree.tag_configure("product_group", font=("Segoe UI", 9, "bold"))
         y_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         x_scroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
@@ -584,17 +613,51 @@ class UploadApp(TkinterDnD.Tk):
         self.tree.bind("<ButtonRelease-1>", self._finish_row_drag, add="+")
         self.tree.bind("<Button-3>", self._show_row_menu)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
-        self.tree.bind("<<TreeviewSelect>>", self._on_tree_selection_changed)
-        self.dnd_bind("<<DropEnter>>", self._on_drop_hover, add="+")
-        self.dnd_bind("<<DropPosition>>", self._on_drop_hover, add="+")
-        self.dnd_bind("<<DropLeave>>", lambda _event: self._set_drag_target(""), add="+")
 
-        self.log_text = tk.Text(self, height=9, state="disabled")
-        self.log_text.pack(fill="x", padx=8, pady=(0, 4))
-        self.status_var = tk.StringVar(value="就绪")
         ttk.Label(
-            self, textvariable=self.status_var, relief="sunken", anchor="w"
-        ).pack(fill="x", side="bottom")
+            parent, style="Source.TLabel",
+            text=(
+                "拖入 PDF 或 PDF 文件夹 · 图纸命名：图号 名称.pdf｜工艺文档：图号.pdf"
+                " · 双击系列产品名称编辑，回车保存"
+            ),
+        ).pack(anchor="w", pady=(6, 0))
+
+    def _build_status_panel(self, parent):
+        status = ttk.Frame(parent, padding=(12, 6), style="Panel.TFrame")
+        status.pack(fill="x")
+        status.columnconfigure(0, weight=1)
+        self.status_var = tk.StringVar(value="就绪")
+        summary = ttk.Label(status, textvariable=self.status_var, style="Panel.TLabel", width=1)
+        summary.grid(row=0, column=0, sticky="ew")
+        summary.bind("<Configure>", lambda event: summary.configure(wraplength=event.width))
+        self.log_button = ttk.Button(status, text="展开日志", command=self._toggle_log)
+        self.log_button.grid(row=0, column=1, padx=(8, 0))
+
+        self.log_frame = ttk.Frame(parent, padding=(12, 0, 12, 8), style="Panel.TFrame")
+        self.log_text = tk.Text(
+            self.log_frame, height=7, state="disabled", wrap="word", borderwidth=0,
+            padx=8, pady=5, background="#f1f5fa", foreground="#243b55",
+            font="TkFixedFont",
+        )
+        scroll = ttk.Scrollbar(self.log_frame, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.log_text.pack(side="left", fill="both", expand=True)
+
+    def _toggle_log(self):
+        if self.log_frame.winfo_manager():
+            self.log_frame.pack_forget()
+            self.log_button.configure(text="展开日志")
+        else:
+            self.log_frame.pack(fill="x")
+            self.log_text.see("end")
+            self.log_button.configure(text="收起日志")
+
+    def _drawing_column_at(self, x: int) -> str:
+        display_column = self.tree.identify_column(x)
+        if not display_column:
+            return ""
+        return self.tree.column(display_column, "id")
 
     def log(self, message: str):
         self.events.put(("log", message))
@@ -678,7 +741,8 @@ class UploadApp(TkinterDnD.Tk):
                     self._set_series_product_required(
                         {
                             drawing_bundle.normalize_code(row.get("code"))
-                            for row in missing_names
+                            for row in products
+                            if row.get("requires_product_name", not row["exists"])
                         }
                     )
                     if missing_names:
@@ -687,7 +751,7 @@ class UploadApp(TkinterDnD.Tk):
                     if products:
                         product_text = (
                             "；03整机产品已有 %d 个，待新建 %d 个，"
-                            "缺失整机Part %d 个，缺失系列目录 %d 个"
+                            "缺少整机零件 %d 个，缺少系列目录 %d 个"
                             % (
                                 existing_products,
                                 missing_products,
@@ -696,7 +760,7 @@ class UploadApp(TkinterDnD.Tk):
                             )
                         )
                     if missing_process_parts:
-                        product_text += "；02半成品Part缺失 %d 个" % len(
+                        product_text += "，缺少 02 半成品零件 %d 个" % len(
                             missing_process_parts
                         )
                     if process_parts_will_create:
@@ -704,7 +768,7 @@ class UploadApp(TkinterDnD.Tk):
                             process_parts_will_create
                         )
                     self.status_var.set(
-                        "预检完成：已有原件 %d 个（只升版 %d，升版并借用 %d）；"
+                        "预检完成：已有原件 %d 个（不借用 %d，按计划借用 %d），"
                         "共 %d 条关系（归属 %d，借用 %d）%s"
                         % (
                             len(existing_originals),
@@ -720,7 +784,7 @@ class UploadApp(TkinterDnD.Tk):
                     if missing_products:
                         product_detail = (
                             "\n\n有 %d 个03整机所属产品尚不存在。"
-                            "请双击对应系列产品节点或03工艺文档行填写各自的"
+                            "请双击上传清单中对应的系列产品行填写各自的"
                             "系列产品名称；"
                             "上传时会以整机图号为产品代号创建。"
                             % missing_products
@@ -728,8 +792,7 @@ class UploadApp(TkinterDnD.Tk):
                     part_detail = ""
                     if missing_parts:
                         part_detail = (
-                            "\n\n以下03整机Product已存在但缺少整机Part，"
-                            "上传时会自动创建；无需填写产品名称：\n"
+                            "\n\n以下 03 整机的产品已存在，上传时会自动创建缺少的整机零件：\n"
                             + "\n".join(
                                 str(row.get("code") or "")
                                 for row in missing_parts[:20]
@@ -753,8 +816,7 @@ class UploadApp(TkinterDnD.Tk):
                     process_create_detail = ""
                     if process_parts_will_create:
                         process_create_detail = (
-                            "\n\n以下02半成品叶子将在最近的点号上级 Part "
-                            "已存在时自动创建：\n"
+                            "\n\n以下 02 半成品零件会自动建在现有的最近上级零件下：\n"
                             + "\n".join(
                                 "%s（上级 %s）"
                                 % (
@@ -786,7 +848,7 @@ class UploadApp(TkinterDnD.Tk):
                     if existing_originals:
                         original_detail = (
                             "\n\n以下图号在 CAXA 中已有原件。"
-                            "预检已把归属关系改为借用，并提供“只升版”复选框：\n"
+                            "预检已将计划归属改成借用，可在「借用处理」列调整：\n"
                             + "\n".join(
                                 str(row.get("code") or "")
                                 for row in existing_originals[:20]
@@ -795,21 +857,21 @@ class UploadApp(TkinterDnD.Tk):
                     borrow_position_detail = ""
                     if missing_borrow_positions:
                         borrow_position_detail = (
-                            "\n\n以下已有原件选择了“升版并借用”，"
+                            "\n\n以下已有原件选择了「按计划借用」，"
                             "但没有设置借用父级，上传已阻止：\n"
                             + "\n".join(missing_borrow_positions[:20])
                         )
                     duplicate_part_detail = ""
                     if duplicate_parts:
                         duplicate_part_detail = (
-                            "\n\n以下图号在 CAXA 中存在多个原件 Part，"
-                            "违反“同一图号原件只能有一个”；请先人工清理重复对象：\n"
+                            "\n\n以下图号的原件查询结果不一致。"
+                            "请在 CAXA 设计树中检查重复显示的挂接及借用属性：\n"
                             + "\n".join(duplicate_parts[:20])
                         )
                     if duplicate_process_parts:
                         duplicate_part_detail += (
-                            "\n\n以下02半成品存在多个原件、多个非借用归属"
-                            "或上级存在多个原件，上传已阻止：\n"
+                            "\n\n以下 02 半成品或其上级的原件无法确认，或存在多个归属挂接。"
+                            "请在 CAXA 设计树中检查后重试：\n"
                             + "\n".join(
                                 "%s（上级 %s）"
                                 % (
@@ -849,7 +911,7 @@ class UploadApp(TkinterDnD.Tk):
                     else:
                         messagebox.showinfo("CAXA 设计树预检完成", message)
                 elif kind == "upload_done":
-                    snapshot, result, task_settings = payload
+                    snapshot, result, task_settings, workflow_only = payload
                     identity_now = None
                     try:
                         identity_now = ui_logic.identity_key(self._build_settings())
@@ -876,7 +938,7 @@ class UploadApp(TkinterDnD.Tk):
                     else:
                         self.status_var.set("上传未全部成功")
                         messagebox.showwarning("上传结果（需人工确认）", summary)
-                    if result.get("duplicate"):
+                    if result.get("duplicate") and not workflow_only:
                         if messagebox.askyesno(
                             "相同批次已完成",
                             summary + "\n\n是否作为“新任务”重新提交一次？\n"
@@ -1046,13 +1108,13 @@ class UploadApp(TkinterDnD.Tk):
 
     def _init_update_state(self):
         self.update_state = update_checker.UpdateStateStore()
-        self._available_update = self.update_state.cached_update(__version__)
+        checked_today = self.update_state.checked_today()
+        self._available_update = (
+            self.update_state.cached_update(__version__) if checked_today else None
+        )
         self._refresh_update_button()
-        if self._automatic_update_check_enabled():
-            if not self.update_state.checked_today():
-                self._update_after_id = self.after(
-                    700, self._start_daily_update_check
-                )
+        if self._automatic_update_check_enabled() and not checked_today:
+            self._update_after_id = self.after(700, self._start_daily_update_check)
 
     def _ensure_batch_id(self) -> str:
         if self.bundle is None:
@@ -1082,7 +1144,10 @@ class UploadApp(TkinterDnD.Tk):
 
     def _start_daily_update_check(self):
         self._update_after_id = None
-        if self._available_update is not None:
+        if self.update_state.checked_today():
+            return
+        if self.busy or self._update_busy:
+            self._update_after_id = self.after(700, self._start_daily_update_check)
             return
         self._start_update_check(manual=False)
 
@@ -1256,6 +1321,11 @@ class UploadApp(TkinterDnD.Tk):
         info, exc = payload
         self._update_busy = False
         self._update_busy_label = ""
+        self._available_update = None
+        try:
+            self.update_state.clear_cached_update()
+        except OSError as cache_error:
+            self.log("无法清除更新缓存：%s" % cache_error)
         self._refresh_update_button()
         message = "下载 v%s 失败：%s: %s" % (
             info.latest_version,
@@ -1264,7 +1334,7 @@ class UploadApp(TkinterDnD.Tk):
         )
         self.log(message)
         self.status_var.set("更新下载失败")
-        messagebox.showerror("更新下载失败", message)
+        messagebox.showerror("更新下载失败", message + "\n请点击“检查更新”后重试。")
 
     def _relaunch_update_worker(self, info, path: Path):
         try:
@@ -1285,8 +1355,7 @@ class UploadApp(TkinterDnD.Tk):
 
     def _handle_update_relaunch_ready(self, payload):
         _info, path = payload
-        self._update_busy = False
-        self._update_busy_label = ""
+        # Keep CAXA writes blocked until the old process has exited.
         self.log("新版本已启动，正在关闭当前版本：%s" % path)
         self.status_var.set("新版本已启动，正在关闭当前版本…")
         self.after(250, self.destroy)
@@ -1347,6 +1416,13 @@ class UploadApp(TkinterDnD.Tk):
         except Exception:
             self._set_drag_target("")
 
+    def add_pdf_folder(self):
+        if self._blocked_by_busy():
+            return
+        path = filedialog.askdirectory(title="选择包含 PDF 的文件夹")
+        if path:
+            self.add_pdfs([path])
+
     def add_pdfs(self, paths=None, parent_code=""):
         if self._blocked_by_busy():
             return
@@ -1357,17 +1433,31 @@ class UploadApp(TkinterDnD.Tk):
             )
         if not paths:
             return
+        collection = ui_logic.collect_pdf_paths(paths)
+        pdf_paths = collection["files"]
+        ignored_count = int(collection["ignored"] or 0)
+        for error in collection["errors"]:
+            self.log("文件夹读取失败：%s" % error)
+        if not pdf_paths:
+            message = "未找到 PDF 文件"
+            if ignored_count:
+                message += "；已忽略 %d 个文件夹或非 PDF 文件" % ignored_count
+            if collection["errors"]:
+                message += "；读取失败 %d 个路径" % len(collection["errors"])
+            messagebox.showinfo("没有可导入的 PDF", message)
+            self.status_var.set(message)
+            return
         existing = {
             os.path.normcase(os.path.abspath(item.get("file_path") or ""))
             for item in self.items
         }
         added = 0
+        duplicate_count = 0
         added_codes: set[str] = set()
-        for path in paths:
+        for path in pdf_paths:
             path = os.path.abspath(str(path))
-            if not path.lower().endswith(".pdf") or not os.path.isfile(path):
-                continue
             if os.path.normcase(path) in existing:
+                duplicate_count += 1
                 continue
             code, name, errors = drawing_bundle.parse_drawing_filename(path)
             kind, machine = drawing_bundle.infer_kind(code)
@@ -1453,21 +1543,69 @@ class UploadApp(TkinterDnD.Tk):
             message = "已加入 %d 项" % added
             if inferred:
                 message += "，按图号自动匹配 %d 条子级关系" % len(inferred)
-            message += "；标红行可双击修正或点“一键规范文件名”"
+            if duplicate_count:
+                message += "，跳过已存在 %d 项" % duplicate_count
+            if ignored_count:
+                message += "，忽略 %d 个文件夹或非 PDF 文件" % ignored_count
+            if collection["errors"]:
+                message += "，%d 个路径读取失败" % len(collection["errors"])
+            message += "；标红行可双击修正或点“规范并预检”"
             self.status_var.set(message)
             self.log(message)
 
-    def normalize_filenames(self):
+    def normalize_and_precheck(self):
+        if self._blocked_by_busy():
+            return
+        if not self.items:
+            messagebox.showinfo("提示", "当前列表中没有图纸条目")
+            return
+        self._commit_inline_edit()
+        result = self.normalize_filenames(show_feedback=False)
+        message = "文件名规范完成：更新 %d 项" % result["updated"]
+        if result["skipped"]:
+            message += "，需人工修正 %d 项" % result["skipped"]
+        message += "；继续执行本地检查与 CAXA 预检"
+        self.status_var.set(message)
+        self.log(message)
+        self.check_bundle()
+
+    def _confirmed_pdf_fingerprint(self, item: dict) -> dict | None:
+        """Return the observed fingerprint, or None when a change is declined."""
+        path = item.get("file_path") or ""
+        if not os.path.isfile(path):
+            return {}
+        digest, size = drawing_bundle.compute_fingerprint(path)
+        expected_hash = str(item.get("sha256") or "").lower()
+        expected_size = item.get("size")
+        changed = (
+            (expected_hash and expected_hash != digest)
+            or (expected_size is not None and str(expected_size) != str(size))
+        )
+        if changed and not messagebox.askyesno(
+            "PDF 内容已变更",
+            "文件与导入时的内容不同：\n%s\n\n"
+            "确认使用当前 PDF 内容？" % path,
+            parent=self,
+        ):
+            return None
+        return {
+            "sha256": digest,
+            "size": size,
+            "fingerprint_source": item.get("fingerprint_source") or "import",
+        }
+
+    def normalize_filenames(self, show_feedback=True):
         """Fill code/name/machine from the file name; never rename the source.
 
         Uploads always use the canonical target name through staging, so the
         user's files stay untouched.
         """
         if self._blocked_by_busy():
-            return
+            return {"updated": 0, "skipped": 0, "errors": []}
         if not self.items:
-            messagebox.showinfo("提示", "当前列表中没有图纸条目")
-            return
+            if show_feedback:
+                messagebox.showinfo("提示", "当前列表中没有图纸条目")
+            return {"updated": 0, "skipped": 0, "errors": []}
         updated_count = 0
         skipped_errors = []
         updates = []
@@ -1482,6 +1620,14 @@ class UploadApp(TkinterDnD.Tk):
                     "%s：%s" % (os.path.basename(file_path), "；".join(errors))
                 )
                 continue
+            try:
+                fingerprint = self._confirmed_pdf_fingerprint(item)
+            except OSError as exc:
+                skipped_errors.append("%s：读取 PDF 失败（%s）" % (os.path.basename(file_path), exc))
+                continue
+            if fingerprint is None:
+                skipped_errors.append("%s：PDF 内容变更尚未确认" % os.path.basename(file_path))
+                continue
             code = fields["code"]
             old_code = drawing_bundle.normalize_code(item.get("code"))
             if old_code and old_code != code:
@@ -1493,6 +1639,7 @@ class UploadApp(TkinterDnD.Tk):
                     str(item.get("kind") or ""),
                     drawing_bundle.normalize_code(item.get("machine")),
                     fields,
+                    fingerprint,
                 )
             )
 
@@ -1502,7 +1649,12 @@ class UploadApp(TkinterDnD.Tk):
             self.manual_borrows,
             code_mapping,
         )
-        for item, old_code, old_kind, old_machine, fields in updates:
+        for item, old_code, old_kind, old_machine, fields, fingerprint in updates:
+            content_changed = bool(
+                item.get("sha256")
+                and fingerprint.get("sha256")
+                and str(item["sha256"]).lower() != fingerprint["sha256"]
+            )
             item.update(fields)
             if fields["kind"] == "machine_drawing":
                 item["series_product_folder"] = (
@@ -1512,13 +1664,13 @@ class UploadApp(TkinterDnD.Tk):
             elif fields["kind"] == "component":
                 item["series_product_name"] = ""
                 item["series_product_folder"] = ""
-            drawing_bundle.register_fingerprint(item, force=True)
+            item.update(fingerprint)
             item["filename_error"] = ""
             item["note"] = ""
-            item["upload_sel"] = True
             if item.get("status") == "文件名不符合":
+                item["upload_sel"] = True
                 item["status"] = "待上传（次级条目）" if item.get("borrow") else "待上传"
-            elif (
+            elif content_changed or (
                 old_code,
                 old_kind,
                 old_machine,
@@ -1542,10 +1694,19 @@ class UploadApp(TkinterDnD.Tk):
                 len(skipped_errors),
                 "\n".join(skipped_errors[:8]),
             )
-            messagebox.showwarning("一键规范文件名结果", msg)
+            if show_feedback:
+                messagebox.showwarning("文件名规范化结果", msg)
+            else:
+                self.status_var.set(msg)
+                self.log(msg)
         else:
             self.status_var.set(msg)
             self.log(msg)
+        return {
+            "updated": updated_count,
+            "skipped": len(skipped_errors),
+            "errors": skipped_errors,
+        }
 
     def open_bundle(self):
         path = filedialog.askopenfilename(
@@ -1567,6 +1728,8 @@ class UploadApp(TkinterDnD.Tk):
             return
         try:
             manifest_path, bundle = drawing_bundle.load_bundle(path)
+            self._close_inline_editor()
+            self._series_product_required_codes.clear()
             self.manifest_path = manifest_path
             self.bundle = bundle
             self._ensure_batch_id()
@@ -1592,6 +1755,10 @@ class UploadApp(TkinterDnD.Tk):
 
     def refresh_tree(self):
         selected_rows = self.tree.selection()
+        selected_products = {
+            self._tree_product_nodes[row] for row in selected_rows
+            if row in self._tree_product_nodes
+        }
         selected_codes = {
             self._tree_codes.get(row) for row in selected_rows if self._tree_codes.get(row)
         }
@@ -1806,7 +1973,7 @@ class UploadApp(TkinterDnD.Tk):
                     upgrade_only_text = (
                         "☑ 不借用"
                         if item.get("upgrade_only")
-                        else "☐ 升版并借用"
+                        else "☐ 按计划借用"
                     )
                 values = (
                     item.get("source", ""),
@@ -1814,7 +1981,7 @@ class UploadApp(TkinterDnD.Tk):
                     kind_text,
                     item.get("machine", ""),
                     relation_label or ("父级" if grouped.get(code) else ""),
-                    "异常" if problems else ("需规范" if warnings else "OK"),
+                    "异常" if problems else ("需规范" if warnings else "合规"),
                     "是" if item.get("upload_sel", True) else "否",
                     upgrade_only_text,
                     item.get("status", ""),
@@ -1888,14 +2055,13 @@ class UploadApp(TkinterDnD.Tk):
             if code and code not in rendered_codes:
                 insert_root(code)
 
-        if selected_codes:
-            restored = []
-            for iid, code in self._tree_codes.items():
-                if code in selected_codes:
-                    restored.append(iid)
-            if restored:
-                self.tree.selection_set(*restored)
-                self.tree.see(restored[0])
+        restored = [iid for iid, code in self._tree_codes.items() if code in selected_codes]
+        restored.extend(
+            iid for iid, code in self._tree_product_nodes.items() if code in selected_products
+        )
+        if restored:
+            self.tree.selection_set(*restored)
+            self.tree.see(restored[0])
 
     def _batch_codes(self) -> set[str]:
         return {
@@ -2061,7 +2227,7 @@ class UploadApp(TkinterDnD.Tk):
         if (
             self.busy
             or not row
-            or self.tree.identify_column(event.x) == UPLOAD_COLUMN
+            or self._drawing_column_at(event.x) in (UPLOAD_COLUMN, UPGRADE_ONLY_COLUMN)
         ):
             self._drag_source_row = ""
             self._drag_source_rows = ()
@@ -2292,51 +2458,39 @@ class UploadApp(TkinterDnD.Tk):
         if not parent_code and selection:
             parent_code = self._tree_codes.get(selection[0], "")
         dialog = tk.Toplevel(self)
-        dialog.title("增加次级条目")
+        dialog.title("借用已有零件")
         dialog.transient(self)
         dialog.grab_set()
         form = ttk.Frame(dialog, padding=12)
         form.pack(fill="both", expand=True)
-        ttk.Label(form, text="父级 PDF 图号").grid(
+        ttk.Label(form, text="上级图号").grid(
             row=0, column=0, sticky="e", pady=4
         )
         parent_var = tk.StringVar(value=parent_code)
         ttk.Entry(form, textvariable=parent_var, width=52).grid(
             row=0, column=1, sticky="w", pady=4
         )
-        ttk.Label(form, text="次级条目").grid(
+        ttk.Label(form, text="借用零件图号").grid(
             row=1, column=0, sticky="e", pady=4
         )
         child_var = tk.StringVar()
-        combo = ttk.Combobox(
-            form,
-            textvariable=child_var,
-            values=(),
-            width=52,
-        )
-        combo.grid(row=1, column=1, sticky="w", pady=4)
-
-        ttk.Label(form, text="关系类型").grid(
-            row=2, column=0, sticky="e", pady=4
-        )
-        ttk.Label(
-            form, text="仅借用 CAXA 设计树中已存在的零件（reference=True）"
-        ).grid(row=2, column=1, sticky="w", pady=4)
+        child_entry = ttk.Entry(form, textvariable=child_var, width=52)
+        child_entry.grid(row=1, column=1, sticky="w", pady=4)
 
         ttk.Label(
             form,
-            text="请输入 CAXA 设计树中已存在的子图号；不存在时跳过并报错，不新建 Part。",
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 8))
+            text="请填写 CAXA 设计树里已有的零件图号。",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 8))
 
         def save():
             parent = drawing_bundle.normalize_code(parent_var.get())
             child = self._extract_code_text(child_var.get())
             if not drawing_bundle.is_valid_code(parent):
-                messagebox.showwarning("父级图号无效", "请填写有效的父级 PDF 图号。")
+                messagebox.showwarning("上级图号无效", "请填写有效的上级图号。")
                 return
             if not drawing_bundle.is_valid_code(child):
                 messagebox.showwarning(
-                    "次级图号无效", "请输入 CAXA 设计树中已存在的有效图号。"
+                    "借用零件图号无效", "请输入 CAXA 设计树中已有的零件图号。"
                 )
                 return
             if not self._add_relation(
@@ -2347,16 +2501,16 @@ class UploadApp(TkinterDnD.Tk):
                 manual_override=True,
                 link_only=True,
             ):
-                messagebox.showinfo("提示", "该次级关系已更新或已存在。")
+                messagebox.showinfo("提示", "该借用关系已在上传计划中。")
             self.refresh_tree()
-            self.log("已增加次级条目：%s ← %s" % (parent, child))
+            self.log("已添加借用计划：%s ← %s" % (parent, child))
             dialog.destroy()
 
-        ttk.Button(form, text="添加", command=save).grid(
-            row=4, column=0, columnspan=2, pady=(6, 0)
+        ttk.Button(form, text="加入借用计划", command=save).grid(
+            row=3, column=0, columnspan=2, pady=(6, 0)
         )
         self._center_dialog_on_parent(dialog)
-        dialog.after(50, combo.focus_set)
+        dialog.after(50, child_entry.focus_set)
 
     def delete_selected_relation(self):
         if self._blocked_by_busy():
@@ -2459,12 +2613,12 @@ class UploadApp(TkinterDnD.Tk):
             )
         if code:
             menu.add_command(
-                label="增加次级条目…",
+                label="借用已有零件…",
                 command=lambda: self.add_relation_dialog(code),
             )
         if item is not None:
             menu.add_command(
-                label="一键规范文件名",
+                label="规范文件名",
                 command=self.normalize_filenames,
             )
             menu.add_separator()
@@ -2475,17 +2629,17 @@ class UploadApp(TkinterDnD.Tk):
         if relation is not None:
             menu.add_separator()
             menu.add_command(
-                label="切换 归属子件 / 借用",
+                label="切换归属 / 借用",
                 command=self.toggle_selected_relation_type,
             )
             menu.add_command(
-                label="删除此关系",
+                label="从计划中移除此关系",
                 command=self.delete_selected_relation,
             )
-        elif self.tree.get_children(row):
+        elif code and any(relation.get("parent_code") == code for relation in self.relations):
             menu.add_separator()
             menu.add_command(
-                label="删除此父级下的全部关系",
+                label="从计划中移除此上级的所有关系",
                 command=self.delete_selected_relation,
             )
         menu.tk_popup(event.x_root, event.y_root)
@@ -2528,20 +2682,11 @@ class UploadApp(TkinterDnD.Tk):
         self._series_product_required_codes.intersection_update(
             remaining_products
         )
-        if self._series_product_code not in remaining_products:
-            self._series_product_code = ""
-            self._syncing_series_product = True
-            try:
-                self.series_product_var.set("")
-            finally:
-                self._syncing_series_product = False
-            self.series_product_entry.configure(state="disabled")
         if self.bundle is not None:
             self.bundle["items"] = self.items
             self.bundle["relations"] = self.relations
             self.bundle["manual_borrows"] = self.manual_borrows
         self.refresh_tree()
-        self._refresh_series_product_required_style()
         removed_count = len(removed_codes)
         self.status_var.set("已从列表移除 %d 项图纸" % removed_count)
         self.log(
@@ -2557,7 +2702,7 @@ class UploadApp(TkinterDnD.Tk):
             return
         if self.tree.identify("region", event.x, event.y) != "cell":
             return
-        column = self.tree.identify_column(event.x)
+        column = self._drawing_column_at(event.x)
         if column not in (UPLOAD_COLUMN, UPGRADE_ONLY_COLUMN):
             return
         row = self.tree.identify_row(event.y)
@@ -2574,12 +2719,12 @@ class UploadApp(TkinterDnD.Tk):
             item["upgrade_only_defaulted"] = False
             if item["upgrade_only"]:
                 self.status_var.set(
-                    "%s：只升版，不执行归属/借用关系"
+                    "%s：处理图纸，跳过归属和借用关系"
                     % drawing_bundle.normalize_code(item.get("code"))
                 )
             else:
                 self.status_var.set(
-                    "%s：先升版，再按当前关系借用"
+                    "%s：处理图纸后，按上传计划借用"
                     % drawing_bundle.normalize_code(item.get("code"))
                 )
             self.refresh_tree()
@@ -2587,7 +2732,7 @@ class UploadApp(TkinterDnD.Tk):
         if not item.get("filename_valid", True):
             messagebox.showwarning(
                 "文件名不符合",
-                "请先双击修改或点击“一键规范文件名”修正后再勾选。",
+                "请先双击修改或点击“规范并预检”修正后再勾选。",
             )
             return
         item["upload_sel"] = not bool(item.get("upload_sel", True))
@@ -2638,57 +2783,6 @@ class UploadApp(TkinterDnD.Tk):
         for item in self._series_product_items(code):
             item["series_product_name"] = name
 
-    def _on_tree_selection_changed(self, _event=None):
-        if self._syncing_series_product:
-            return
-        selected = self.tree.selection()
-        if len(selected) != 1:
-            return
-        row = selected[0]
-        code = self._tree_product_nodes.get(row, "")
-        if not code:
-            item = self._tree_items.get(row)
-            if item:
-                kind = str(item.get("kind") or "")
-                if kind == "machine_drawing":
-                    code = drawing_bundle.normalize_code(item.get("code"))
-                elif kind == "process_doc":
-                    machine = drawing_bundle.normalize_code(item.get("machine"))
-                    if machine.startswith("03."):
-                        code = machine
-        if not code:
-            return
-        self._commit_series_product_name(refresh=False)
-        self._series_product_code = code
-        item = self._series_product_plan_item(code) or {}
-        self._syncing_series_product = True
-        try:
-            self.series_product_var.set(
-                str(item.get("series_product_name") or "")
-            )
-        finally:
-            self._syncing_series_product = False
-        self.series_product_entry.configure(state="normal")
-        self._refresh_series_product_required_style()
-
-    def _on_series_product_name_changed(self):
-        if self._syncing_series_product or not self._series_product_code:
-            return
-        self._set_series_product_name(
-            self._series_product_code,
-            self.series_product_var.get().strip(),
-        )
-        self._refresh_series_product_required_style()
-
-    def _commit_series_product_name(self, refresh: bool = True):
-        if self._series_product_code:
-            self._set_series_product_name(
-                self._series_product_code,
-                self.series_product_var.get().strip(),
-            )
-        if refresh:
-            self.refresh_tree()
-
     def _select_machine_code(self, code: str):
         code = drawing_bundle.normalize_code(code)
         iid = next(
@@ -2719,34 +2813,13 @@ class UploadApp(TkinterDnD.Tk):
         if iid:
             self.tree.selection_set(iid)
             self.tree.see(iid)
-            self._on_tree_selection_changed()
+            self.tree.focus(iid)
 
     def _set_series_product_required(self, codes: set[str]):
         self._series_product_required_codes = {
             drawing_bundle.normalize_code(code) for code in codes if code
         }
         self.refresh_tree()
-        self._refresh_series_product_required_style()
-
-    def _refresh_series_product_required_style(self):
-        code = self._series_product_code
-        if not code:
-            self.series_product_label_var.set(
-                "03系列产品名称（先选中03整机）"
-            )
-            return
-        required = code in self._series_product_required_codes
-        state = "必填" if required else "可选"
-        self.series_product_label_var.set(
-            "03系列产品名称（%s：%s）" % (state, code)
-        )
-        try:
-            need_value = required and not self.series_product_var.get().strip()
-            self.series_product_entry.configure(
-                style="Required.TEntry" if need_value else "TEntry"
-            )
-        except tk.TclError:
-            pass
 
     def _on_tree_double_click(self, event):
         """Edit only when double-clicking the row body, never its tree indicator."""
@@ -2758,12 +2831,16 @@ class UploadApp(TkinterDnD.Tk):
                 return
         except tk.TclError:
             return
+        row = self.tree.identify_row(event.y)
+        if row in self._tree_product_nodes:
+            self._begin_inline_edit(row, mode="product")
+            return "break"
         self._edit_item(event)
 
     def _close_inline_editor(self):
         editor = self._inline_editor
         self._inline_editor = None
-        self._inline_row = ""
+        self._inline_target = ""
         self._inline_mode = ""
         if editor is not None:
             try:
@@ -2824,7 +2901,7 @@ class UploadApp(TkinterDnD.Tk):
         editor.bind("<Escape>", self._cancel_inline_edit)
         editor.bind("<FocusOut>", self._commit_inline_edit)
         self._inline_editor = editor
-        self._inline_row = row
+        self._inline_target = product_code if mode == "product" else row
         self._inline_mode = mode
         editor.focus_set()
 
@@ -2837,15 +2914,15 @@ class UploadApp(TkinterDnD.Tk):
         if editor is None:
             return "break"
         value = editor.get()
-        row = self._inline_row
+        target = self._inline_target
         mode = self._inline_mode
         self._close_inline_editor()
         if mode == "filename":
-            self._apply_inline_filename(row, value)
+            self._apply_inline_filename(target, value)
         elif mode == "product":
-            self._apply_inline_product(row, value)
+            self._apply_inline_product(target, value)
         elif mode == "series":
-            self._apply_inline_series(row, value)
+            self._apply_inline_series(target, value)
         return "break"
 
     def _apply_inline_filename(self, row: str, value: str):
@@ -2896,6 +2973,13 @@ class UploadApp(TkinterDnD.Tk):
         if problems:
             messagebox.showwarning("信息不完整", "；".join(problems))
             return
+        try:
+            fingerprint = self._confirmed_pdf_fingerprint(item)
+        except OSError as exc:
+            messagebox.showwarning("读取 PDF 失败", str(exc), parent=self)
+            return
+        if fingerprint is None:
+            return
         if old_code and old_code != code:
             for relation in self.relations:
                 if drawing_bundle.normalize_code(
@@ -2918,7 +3002,7 @@ class UploadApp(TkinterDnD.Tk):
                 ) == old_code:
                     other["borrow_to"] = code
         item.update(candidate)
-        drawing_bundle.register_fingerprint(item, force=True)
+        item.update(fingerprint)
         if self.bundle is not None:
             self.bundle["items"] = self.items
             self.bundle["relations"] = self.relations
@@ -2927,24 +3011,19 @@ class UploadApp(TkinterDnD.Tk):
         self.status_var.set("已原地修改文件名：%s" % text)
         self.log(self.status_var.get())
 
-    def _apply_inline_product(self, row: str, value: str):
-        code = drawing_bundle.normalize_code(
-            self._tree_product_nodes.get(row, "")
-        )
-        item = self._series_product_plan_item(code)
-        if item is None:
+    def _apply_inline_product(self, code: str, value: str):
+        members = self._series_product_items(code)
+        if not members:
             return
-        new_name = str(value or "").strip()
-        if not new_name:
-            messagebox.showwarning("产品名称无效", "产品名称不能为空。")
-            return
-        if new_name == str(item.get("series_product_name") or "").strip():
+        new_name = value.strip()
+        if all(str(item.get("series_product_name") or "").strip() == new_name for item in members):
             return
         self._set_series_product_name(code, new_name)
-        self._series_product_required_codes.discard(code)
+        if self.bundle is not None:
+            self.bundle["items"] = self.items
         self.refresh_tree()
         self.status_var.set(
-            "已更新上传计划产品名称；CAXA 中已有产品将直接复用，否则新建"
+            "已保存到当前上传计划：%s · %s" % (code, new_name or "已清空产品名称")
         )
         self.log(self.status_var.get())
 
@@ -2974,7 +3053,10 @@ class UploadApp(TkinterDnD.Tk):
             self.bundle["items"] = self.items
             self.bundle["relations"] = self.relations
         self.refresh_tree()
-        action = "已修改上传计划系列；上传时已有则复用，否则新建"
+        action = (
+            "已修改上传计划系列；上传时目录必须已存在，"
+            "Product 可在既有目录下复用或新建"
+        )
         self.status_var.set(action)
         self.log("%s：%s → %s" % (action, old_path, target_path))
 
@@ -3020,7 +3102,8 @@ class UploadApp(TkinterDnD.Tk):
         form.pack()
         values = {}
         for row, (key, label) in enumerate(
-            (("code", "图号"), ("name", "名称"), ("machine", "成品代码"))
+            (("code", "图号"), ("name", "图纸名称"),
+             ("machine", drawing_bundle.MACHINE_FIELD_LABEL))
         ):
             ttk.Label(form, text=label).grid(row=row, column=0, sticky="e", pady=3)
             value = tk.StringVar(value=str(item.get(key) or ""))
@@ -3029,12 +3112,12 @@ class UploadApp(TkinterDnD.Tk):
             )
             values[key] = value
 
-        ttk.Label(form, text="类型").grid(row=3, column=0, sticky="e", pady=3)
-        kind_var = tk.StringVar(value=str(item.get("kind") or "component"))
+        ttk.Label(form, text="文档类型").grid(row=3, column=0, sticky="e", pady=3)
+        kind_var = tk.StringVar(value=KIND_LABEL.get(item.get("kind") or "component", "未知"))
         ttk.Combobox(
             form,
             textvariable=kind_var,
-            values=("process_doc", "machine_drawing", "component", "unknown"),
+            values=tuple(KIND_LABEL.values()),
             state="readonly",
             width=41,
         ).grid(row=3, column=1, sticky="w", pady=3)
@@ -3091,13 +3174,9 @@ class UploadApp(TkinterDnD.Tk):
             or item.get("parent_code")
             or ""
         )
-        link_type_labels = {
-            "": "无上级关系",
-            "own": "归属父级 (reference=False)",
-            "borrow": "借用父级 (reference=True)",
-        }
+        link_type_labels = {"": "无上级关系", **LINK_TYPE_LABEL}
         link_type_var = tk.StringVar(
-            value=link_type_labels.get(current_link_type, current_link_type)
+            value=link_type_labels.get(current_link_type, "无上级关系")
         )
         ttk.Label(form, text="上级关系").grid(
             row=6, column=0, sticky="e", pady=3
@@ -3109,7 +3188,7 @@ class UploadApp(TkinterDnD.Tk):
             state="readonly",
             width=41,
         ).grid(row=6, column=1, sticky="w", pady=3)
-        ttk.Label(form, text="上级 PDF 图号").grid(
+        ttk.Label(form, text="上级图号").grid(
             row=7, column=0, sticky="e", pady=3
         )
         borrow_to_var = tk.StringVar(
@@ -3129,7 +3208,7 @@ class UploadApp(TkinterDnD.Tk):
             new_code = drawing_bundle.normalize_code(values["code"].get())
             new_name = values["name"].get().strip()
             new_machine = drawing_bundle.normalize_code(values["machine"].get())
-            new_kind = kind_var.get()
+            new_kind = KIND_VALUE[kind_var.get()]
             new_series_name = series_name_var.get().strip()
             if new_kind != "machine_drawing":
                 new_series_name = ""
@@ -3173,7 +3252,7 @@ class UploadApp(TkinterDnD.Tk):
             if new_link_type and not drawing_bundle.is_valid_code(new_parent):
                 messagebox.showwarning(
                     "上级图号无效",
-                    "已选择上级关系时必须填写有效的上级 PDF 图号。",
+                    "选择归属或借用时，请填写有效的上级图号。",
                 )
                 return
             if new_borrow and new_parent.startswith("03."):
@@ -3241,6 +3320,8 @@ class UploadApp(TkinterDnD.Tk):
                 series_product_name=new_series_name,
                 series_product_folder=new_series_folder,
             )
+            if new_kind == "machine_drawing":
+                self._set_series_product_name(new_code, new_series_name)
             if new_link_type and new_parent:
                 self._add_relation(
                     new_parent,
@@ -3295,7 +3376,7 @@ class UploadApp(TkinterDnD.Tk):
         if not self.bundle:
             messagebox.showwarning("提示", "请先打开上传包或添加 PDF")
             return
-        self._apply_series_product_name()
+        self._commit_inline_edit()
         self._ensure_batch_id()
         snapshot = ui_logic.snapshot_manifest(self.bundle)
         result = preview_bundle(snapshot)
@@ -3312,7 +3393,7 @@ class UploadApp(TkinterDnD.Tk):
                 "本地检查未通过",
                 self.status_var.get()
                 + ("\n\n" + "\n".join(details) if details else "")
-                + "\n\n可双击行修正，或点击“一键规范文件名”。",
+                + "\n\n可双击行修正，或点击「规范并预检」。",
             )
             return
         has_machine = bool(collect_machine_targets(self.items))
@@ -3359,7 +3440,7 @@ class UploadApp(TkinterDnD.Tk):
             or relation.get("source") == "manual"
         ]
         if not self.manual_borrows and not existing_only:
-            messagebox.showwarning("提示", "请先增加次级/借用条目")
+            messagebox.showwarning("提示", "请先添加借用计划")
             return
         try:
             settings = self._build_settings()
@@ -3411,9 +3492,6 @@ class UploadApp(TkinterDnD.Tk):
             )
             return False
 
-    def _apply_series_product_name(self):
-        self._commit_series_product_name(refresh=False)
-
     def _workflow_options(self) -> dict:
         return {
             "template_id": int(self.cfg.get("workflow_template_id", 1)),
@@ -3453,7 +3531,7 @@ class UploadApp(TkinterDnD.Tk):
             "单独发起流程",
             "将为当前勾选的 %d 项图纸发起“审核打印”流程，审核人：%s。\n"
             "本操作只使用本机已确认成功的上传记录，不会重新上传 PDF；"
-            "若存在未确认上传的图纸或未完成的关系，将直接阻止。\n\n"
+            "若图纸上传尚未确认，或 CAXA 中缺少当前计划关系，将停止发起。\n\n"
             "是否继续？" % (len(selected), settings["performer"]),
         )
         if not answer:
@@ -3489,21 +3567,20 @@ class UploadApp(TkinterDnD.Tk):
             messagebox.showwarning("提示", str(exc))
             return
         self._note_identity(settings)
-        self._apply_series_product_name()
+        self._commit_inline_edit()
         required_missing = sorted(
             code for code in self._series_product_required_codes
             if (
-                (item := self._series_product_plan_item(code)) is not None
-                and bool(item.get("upload_sel", True))
-                and not str(item.get("series_product_name") or "").strip()
+                any(item.get("upload_sel", True) for item in self._series_product_items(code))
+                and not str((self._series_product_plan_item(code) or {}).get("series_product_name") or "").strip()
             )
         )
         if required_missing:
             self._select_machine_code(required_missing[0])
-            self.series_product_entry.focus_set()
+            self.tree.focus_set()
             messagebox.showwarning(
                 "缺少系列产品名称",
-                "预检发现以下03整机产品不存在，请逐台填写系列产品名称：\n"
+                "以下03整机产品不存在，请双击清单中对应的系列产品行填写名称：\n"
                 + "\n".join(required_missing[:20]),
             )
             return
@@ -3520,7 +3597,7 @@ class UploadApp(TkinterDnD.Tk):
                 "检查未通过",
                 "上传包内没有选中的图纸，或存在缺失 PDF/字段/内容校验异常。\n"
                 + ("\n".join(details) if details else "")
-                + "\n可点击“一键规范文件名”或双击行修正。",
+                + "\n可点击「规范并预检」或双击行修正。",
             )
             return
         if settings["start_workflow"]:
@@ -3573,12 +3650,15 @@ class UploadApp(TkinterDnD.Tk):
                     str(self.manifest_path.parent) if self.manifest_path else ""
                 ),
             )
-            self.events.put(("upload_done", (snapshot, result, settings)))
+            self.events.put((
+                "upload_done", (snapshot, result, settings, bool(options.get("workflow_only")))
+            ))
         except Exception as exc:
             self.events.put(("task_error", "%s: %s" % (type(exc).__name__, exc)))
 
     def _recovery_worker(
-        self, selected, settings, items_by_code, workflow_overrides=None
+        self, selected, settings, items_by_code, workflow_overrides=None,
+        active_digest=None,
     ):
         """Verify selected pending operations without blocking the Tk loop."""
         journal = None
@@ -3638,9 +3718,12 @@ class UploadApp(TkinterDnD.Tk):
                         code = drawing_bundle.normalize_code(
                             row.get("item_code") or row.get("key")
                         )
-                        evidence = active.verify_upload(
-                            row, items_by_code.get(code)
+                        current_item = (
+                            items_by_code.get(code)
+                            if active_digest and task.get("digest") == active_digest
+                            else None
                         )
+                        evidence = active.verify_upload(row, current_item)
                     elif kind == "relation":
                         evidence = active.verify_relation(row)
                     elif kind == "workflow":
@@ -3716,7 +3799,7 @@ class UploadApp(TkinterDnD.Tk):
         try:
             tasks = [
                 (task, journal.pending_operations(task["task_id"]))
-                for task in journal.list_tasks(limit=20)
+                for task in journal.list_tasks_with_pending_operations()
             ]
             pending_tasks = [(task, rows) for task, rows in tasks if rows]
             if not pending_tasks:
@@ -3728,6 +3811,15 @@ class UploadApp(TkinterDnD.Tk):
             if action == "cancel":
                 return
             if action in ("no_write", "no_write_retry"):
+                active_digest = None
+                if self.bundle is not None:
+                    try:
+                        active_digest = content_digest(self.bundle, self._build_settings())
+                    except ui_logic.SettingsError:
+                        pass
+                all_in_current_batch = bool(active_digest and selected) and all(
+                    task.get("digest") == active_digest for task, _row in selected
+                )
                 for task, row in selected:
                     journal.resolve_operation(
                         task["task_id"],
@@ -3736,9 +3828,10 @@ class UploadApp(TkinterDnD.Tk):
                         result="no_write",
                         note="UI 人工确认未写入",
                     )
-                    ui_logic.mark_no_write_in_plan(
-                        self.items, self.relations, row
-                    )
+                    if active_digest and task.get("digest") == active_digest:
+                        ui_logic.mark_no_write_in_plan(
+                            self.items, self.relations, row
+                        )
                     self.log(
                         "已记录人工确认未写入：%s %s"
                         % (
@@ -3750,19 +3843,22 @@ class UploadApp(TkinterDnD.Tk):
                     self.bundle["items"] = self.items
                     self.bundle["relations"] = self.relations
                 self.refresh_tree()
-                if action == "no_write_retry":
+                if action == "no_write_retry" and all_in_current_batch:
                     self.status_var.set(
                         "已确认 %d 项未写入，正在回到主界面重新上传…"
                         % len(selected)
                     )
                     self.after(0, self.start_upload)
                 else:
+                    guidance = (
+                        "现在可点击“开始上传”重试。" if all_in_current_batch
+                        else "请打开对应上传批次并使用原 CAXA 账号，再点击“开始上传”。"
+                    )
                     messagebox.showinfo(
                         "已确认未写入",
-                        "已解除 %d 项待核实状态。现在可点击“开始上传”重试。"
-                        % len(selected),
+                        "已解除 %d 项待核实状态。%s" % (len(selected), guidance),
                     )
-                    self.status_var.set("待核实已解除，可重新上传")
+                    self.status_var.set("待核实已解除")
                 return
 
             workflow_overrides = {}
@@ -3800,6 +3896,7 @@ class UploadApp(TkinterDnD.Tk):
                     settings,
                     items_by_code,
                     workflow_overrides,
+                    content_digest(self.bundle, settings) if self.bundle else None,
                 ),
                 daemon=True,
             ).start()

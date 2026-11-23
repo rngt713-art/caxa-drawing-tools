@@ -24,6 +24,21 @@ class UIAcceptance(unittest.TestCase):
         a.add_pdfs([str(self.f)]); self.assertEqual(len(a.items),1)
         self.assertTrue(all(str(b.cget('state'))=='disabled' for b in a.action_buttons))
         a.set_busy(False); self.assertTrue(all(str(b.cget('state'))=='normal' for b in a.action_buttons))
+    def test_collapsible_panels_preserve_settings_and_log(self):
+        a = self.app
+        self.assertEqual(a.settings_frame.winfo_manager(), "pack")
+        a.ip_var.set("192.0.2.1")
+        a.settings_button.invoke()
+        self.assertFalse(a.settings_frame.winfo_manager())
+        a.settings_button.invoke()
+        self.assertEqual(a.ip_var.get(), "192.0.2.1")
+        self.assertFalse(a.log_frame.winfo_manager())
+        a._append_ui_log("离线测试")
+        a.log_button.invoke()
+        self.assertEqual(a.log_frame.winfo_manager(), "pack")
+        self.assertIn("离线测试", a.log_text.get("1.0", "end"))
+        a.log_button.invoke()
+        self.assertFalse(a.log_frame.winfo_manager())
     def test_manual_bundle_keeps_one_batch_id_when_rows_are_added(self):
         a=self.app
         a.add_pdfs([str(self.f)])
@@ -59,16 +74,74 @@ class UIAcceptance(unittest.TestCase):
         after.assert_called_once_with(150,a._poll_events)
     def test_duplicate_policy_uses_chinese_labels(self):
         a=self.app
-        self.assertEqual(tuple(a.duplicate_combo.cget('values')),('追加新版次','已有则复用'))
-        self.assertEqual(a.duplicate_var.get(),'追加新版次')
+        self.assertEqual(tuple(a.duplicate_combo.cget('values')),('升版','复用'))
+        self.assertEqual(a.duplicate_var.get(),'升版')
+        a.duplicate_combo.current(1)
+        a.ip_var.set("192.0.2.22")
+        a.user_var.set("operator")
+        self.assertEqual(a._build_settings()["duplicate_policy"], "reuse")
     def test_workflow_only_button_is_available_in_action_bar(self):
         labels=[str(button.cget('text')) for button in self.app.action_buttons]
-        self.assertIn('发起流程',labels)
+        self.assertIn('发起审核打印',labels)
     def test_update_button_is_integrated_and_never_auto_downloads(self):
         self.assertIn(self.app.update_button,self.app.action_buttons)
         text=str(self.app.update_button.cget('text'))
         self.assertTrue(text=='检查更新' or text.startswith('下载 v'))
         self.assertFalse(self.app._automatic_update_check_enabled())
+    def test_daily_update_refreshes_yesterdays_cache(self):
+        a = self.app
+        old_release = ui.update_checker.UpdateInfo(
+            current_version="1.2.2", latest_version="1.3.0", available=True,
+            tag_name="v1.3.0", asset_name="图纸上传助手.exe",
+            download_url="https://example.test/old.exe", sha256="a" * 64,
+        )
+        cache = ui.update_checker.UpdateStateStore(Path(self.tmp.name) / "update.json")
+        cache.mark_attempt(success=True, info=old_release, today=ui.update_checker.date.min)
+        with patch.object(ui.update_checker, "UpdateStateStore", return_value=cache):
+            with patch.object(a, "_automatic_update_check_enabled", return_value=True):
+                with patch.object(a, "after", return_value="daily") as after:
+                    a._init_update_state()
+        self.assertIsNone(a._available_update)
+        after.assert_called_once_with(700, a._start_daily_update_check)
+        with patch.object(a, "_start_update_check") as check_update:
+            a._start_daily_update_check()
+        check_update.assert_called_once_with(manual=False)
+
+    def test_download_failure_returns_update_button_to_check(self):
+        a = self.app
+        release = ui.update_checker.UpdateInfo(
+            current_version="1.2.2", latest_version="1.3.0", available=True,
+            tag_name="v1.3.0", asset_name="图纸上传助手.exe",
+            download_url="https://example.test/missing.exe", sha256="a" * 64,
+        )
+        path = Path(self.tmp.name) / "update.json"
+        a.update_state = ui.update_checker.UpdateStateStore(path)
+        a.update_state.mark_attempt(success=True, info=release)
+        a._available_update = release
+        a._handle_update_download_error((release, ui.update_checker.UpdateError("HTTP 404")))
+        cache = ui.update_checker.UpdateStateStore(path)
+        self.assertIsNone(cache.cached_update("1.2.2"))
+        self.assertFalse(cache.checked_today())
+        self.assertEqual(a.update_button.cget("text"), "检查更新")
+        with patch.object(a, "_start_update_check") as check_update:
+            a.on_update_button()
+        check_update.assert_called_once_with(manual=True)
+
+    def test_update_relaunch_keeps_writes_blocked_until_exit(self):
+        a = self.app
+        a._update_busy = True
+        with patch.object(a, "after") as after:
+            a._handle_update_relaunch_ready((None, "new.exe"))
+        after.assert_called_once_with(250, a.destroy)
+        self.assertTrue(a._blocked_by_update())
+
+    def test_completed_workflow_only_does_not_offer_reupload(self):
+        a = self.app
+        a.events.put(("upload_done", ({}, {"ok": True, "duplicate": True}, {}, True)))
+        with patch.object(ui.messagebox, "askyesno") as confirm:
+            a._poll_events()
+        confirm.assert_not_called()
+
     def test_downloaded_update_waits_for_active_upload(self):
         path=Path(self.tmp.name)/'CAXA-Drawing-Uploader-v1.2.0.exe'
         path.write_bytes(b'exe')
@@ -98,10 +171,15 @@ class UIAcceptance(unittest.TestCase):
         iid=next(iid for iid,code in a._tree_codes.items() if code=='01.01-01')
         self.assertIn('已有原件',a.tree.item(iid,'values')[2])
         self.assertIn('☑',a.tree.item(iid,'values')[7])
-        with patch.object(a.tree,'identify',return_value='cell'), \
-             patch.object(a.tree,'identify_column',return_value='#8'), \
-             patch.object(a.tree,'identify_row',return_value=iid):
-            a._toggle_upload(SimpleNamespace(x=5,y=5))
+        a.deiconify()
+        a.update()
+        a.tree.see(iid)
+        a.update_idletasks()
+        x, y, width, height = a.tree.bbox(iid, "upgrade_only")
+        point = SimpleNamespace(x=x + width // 2, y=y + height // 2)
+        self.assertEqual(a.tree.identify("region", point.x, point.y), "cell")
+        self.assertEqual(a.tree.identify_row(point.y), iid)
+        a._toggle_upload(point)
         self.assertFalse(item['upgrade_only'])
         self.assertIn('☐',a.tree.item(iid,'values')[7])
     def test_add_relation_dialog_is_centered(self):
@@ -247,23 +325,48 @@ class UIAcceptance(unittest.TestCase):
         self.assertEqual(a.tree.parent(other_product_iid),by_path['HT合同特殊'])
         self.assertEqual(a.tree.parent(hgb_iid),hgb_product_iid)
         self.assertEqual(a.tree.parent(other_iid),other_product_iid)
-    def test_series_product_field_is_per_selected_03_and_required_after_precheck(self):
-        a=self.app
-        m1=Path(self.tmp.name)/'03.HW.015350-46P01 空气压缩机.pdf'; m1.write_bytes(b'PDF-M1')
-        m2=Path(self.tmp.name)/'03.HW.010350-11P01 空气压缩机二.pdf'; m2.write_bytes(b'PDF-M2')
-        a.add_pdfs([str(m1),str(m2)])
-        first=next(iid for iid,code in a._tree_codes.items() if code=='03.HW.015350-46P01')
-        second=next(iid for iid,code in a._tree_codes.items() if code=='03.HW.010350-11P01')
-        a.tree.selection_set(first);a._on_tree_selection_changed();a.series_product_var.set('HW1.5-35')
-        a.tree.selection_set(second);a._on_tree_selection_changed();a.series_product_var.set('HW1-350')
-        a.tree.selection_set(first);a._on_tree_selection_changed()
-        self.assertEqual(a.series_product_var.get(),'HW1.5-35')
-        a._set_series_product_required({'03.HW.015350-46P01'})
-        a._select_machine_code('03.HW.015350-46P01')
-        self.assertIn('必填',a.series_product_label_var.get())
-        a.series_product_var.set('HW1.5-35(直连/水冷)')
-        self.assertEqual(a._item_by_code('03.HW.015350-46P01')['series_product_name'],'HW1.5-35(直连/水冷)')
-        self.assertEqual(a._item_by_code('03.HW.010350-11P01')['series_product_name'],'HW1-350')
+    def test_inline_product_edit_survives_refresh_and_enters_upload_snapshot(self):
+        a = self.app
+        first_code, second_code = "03.HW.001", "03.HW.002"
+        for name in ("03.HW.001 示例整机.pdf", "03.HW.002 第二台整机.pdf", "Z03.HW.001.pdf"):
+            path = Path(self.tmp.name) / name
+            path.write_bytes(b"PDF")
+            a.add_pdfs([str(path)])
+
+        a._set_series_product_required({first_code})
+        a.deiconify()
+        a.update()
+        first = next(row for row, code in a._tree_product_nodes.items() if code == first_code)
+        self.assertEqual(a.tree.set(first, "status"), "必填")
+        a.tree.see(first)
+        a.update_idletasks()
+        x, y, width, height = a.tree.bbox(first, "#0")
+        event = SimpleNamespace(x=x + width // 2, y=y + height // 2)
+        self.assertEqual(a._on_tree_double_click(event), "break")
+        a._inline_editor.insert(0, "首台产品")
+        a._inline_editor.event_generate("<FocusOut>")
+        a.update()
+        a.refresh_tree()
+        first = next(row for row, code in a._tree_product_nodes.items() if code == first_code)
+        self.assertEqual(a.tree.set(first, "status"), "已命名")
+        self.assertEqual(a.tree.item(first, "text"), "系列产品 首台产品")
+        self.assertEqual(a._item_by_code("Z03.HW.001")["series_product_name"], "首台产品")
+
+        second = next(row for row, code in a._tree_product_nodes.items() if code == second_code)
+        a.tree.selection_set(second)
+        a._begin_inline_edit(second, mode="product")
+        a._inline_editor.insert(0, "第二台产品")
+        a.ip_var.set("192.0.2.1")
+        a.user_var.set("test")
+        with patch.object(a, "_save_settings", return_value=True), patch.object(ui.threading, "Thread") as worker:
+            a.start_upload()
+        worker.assert_called_once()
+        snapshot = worker.call_args.kwargs["args"][0]
+        self.assertEqual(
+            {item["code"]: item["series_product_name"] for item in snapshot["items"]},
+            {first_code: "首台产品", second_code: "第二台产品", "Z03.HW.001": "首台产品"},
+        )
+
     def test_product_node_context_menu_has_rename_edit(self):
         a=self.app
         machine=Path(self.tmp.name)/'03.HW.015350-46P01 空气压缩机.pdf'; machine.write_bytes(b'PDF-M')
@@ -271,15 +374,24 @@ class UIAcceptance(unittest.TestCase):
         product_iid=next(iid for iid,code in a._tree_product_nodes.items() if code=='03.HW.015350-46P01')
         machine_iid=next(iid for iid,code in a._tree_codes.items() if code=='03.HW.015350-46P01')
         class FakeMenu:
-            def __init__(self,*args,**kwargs): self.labels=[]
-            def add_command(self,label,command): self.labels.append(label)
+            def __init__(self,*args,**kwargs):
+                self.labels = []
+                self.commands = {}
+            def add_command(self,label,command):
+                self.labels.append(label)
+                self.commands[label] = command
             def add_separator(self): self.labels.append('---')
             def tk_popup(self,*args): pass
         fake=FakeMenu()
         with patch.object(ui.tk,'Menu',return_value=fake),patch.object(a.tree,'identify_row',return_value=product_iid):
             a._show_row_menu(SimpleNamespace(y=10,x_root=1,y_root=1))
         self.assertIn('修改完整信息…',fake.labels)
-        self.assertIn('修改/新建计划产品名称…',fake.labels)
+        with patch.object(a.tree, "bbox", return_value=(5, 5, 300, 28)):
+            fake.commands["修改/新建计划产品名称…"]()
+        a._inline_editor.insert(0, "右键编辑名称")
+        a._commit_inline_edit()
+        a.refresh_tree()
+        self.assertEqual(a._item_by_code("03.HW.015350-46P01")["series_product_name"], "右键编辑名称")
         fake2=FakeMenu()
         with patch.object(ui.tk,'Menu',return_value=fake2),patch.object(a.tree,'identify_row',return_value=machine_iid):
             a._show_row_menu(SimpleNamespace(y=10,x_root=1,y_root=1))
@@ -335,10 +447,31 @@ class UIAcceptance(unittest.TestCase):
         self.assertEqual(a.bundle['relations'],[])
         self.assertEqual(a.bundle['manual_borrows'],[])
         self.assertEqual(a._series_product_required_codes,set())
-        self.assertEqual(a._series_product_code,'')
         self.assertTrue(machine_path.exists())
         self.assertTrue(child_path.exists())
         self.assertTrue(process_path.exists())
+    def test_edit_dialog_shows_business_terms_and_saves_internal_values(self):
+        a = self.app
+        path = Path(self.tmp.name) / "Z03.HW.001.pdf"
+        path.write_bytes(b"%PDF-test")
+        a.add_pdfs([str(path)])
+        row = next(row for row, code in a._tree_codes.items() if code == "Z03.HW.001")
+        a.tree.selection_set(row)
+        a._edit_item()
+        dialog = next(w for w in a.winfo_children() if isinstance(w, ui.tk.Toplevel))
+        form = dialog.winfo_children()[0]
+        kind = form.grid_slaves(row=3, column=1)[0]
+        relation = form.grid_slaves(row=6, column=1)[0]
+        self.assertEqual(kind.get(), "工艺文档")
+        self.assertEqual(tuple(kind.cget("values")), ("工艺文档", "整机图纸", "组件图纸", "未知"))
+        self.assertEqual(tuple(relation.cget("values")), ("无上级关系", "归属", "借用"))
+        relation.current(2)
+        parent = form.grid_slaves(row=7, column=1)[0]
+        parent.insert(0, "03.HW.001")
+        form.grid_slaves(row=8, column=0)[0].invoke()
+        self.assertEqual(a.items[0]["kind"], "process_doc")
+        self.assertEqual(a.relations[0]["link_type"], "borrow")
+
     def test_placeholder_text_is_never_written_to_bound_value(self):
         value=ui.tk.StringVar(master=self.app)
         entry=ui.PlaceholderEntry(
@@ -366,7 +499,7 @@ class UIAcceptance(unittest.TestCase):
         a.add_pdfs([str(machine)])
         product_iid=next(iid for iid,code in a._tree_product_nodes.items() if code=='03.HW.015350-46P01')
         series_iid=next(iid for iid,path in a._tree_product_groups.items() if path=='HW系列')
-        a._apply_inline_product(product_iid,'HW1.5-35(直连/水冷)')
+        a._apply_inline_product(a._tree_product_nodes[product_iid],'HW1.5-35(直连/水冷)')
         self.assertEqual(
             a._item_by_code('03.HW.015350-46P01')['series_product_name'],
             'HW1.5-35(直连/水冷)',
@@ -395,6 +528,66 @@ class UIAcceptance(unittest.TestCase):
             (a.relations[0]['parent_code'],a.relations[0]['child_code']),
             ('01.01','01.01-02'),
         )
+    def test_normalize_preserves_checkbox_and_requires_pdf_change_confirmation(self):
+        a = self.app
+        first = Path(self.tmp.name) / "01.01 First.pdf"
+        second = Path(self.tmp.name) / "01.02 Second.pdf"
+        first.write_bytes(b"%PDF-one")
+        second.write_bytes(b"%PDF-two")
+        a.add_pdfs([str(first), str(second)])
+        changed = a._item_by_code("01.01")
+        deselected = a._item_by_code("01.02")
+        deselected["upload_sel"] = False
+        old_hash = changed["sha256"]
+        first.write_bytes(b"%PDF-replacement")
+        with patch.object(ui.messagebox, "askyesno", return_value=False) as confirm:
+            result = a.normalize_filenames(show_feedback=False)
+        confirm.assert_called_once()
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(changed["sha256"], old_hash)
+        self.assertFalse(deselected["upload_sel"])
+        self.assertFalse(ui.preview_bundle(a.bundle)["ready"])
+
+        with patch.object(ui.messagebox, "askyesno", return_value=True) as confirm:
+            result = a.normalize_filenames(show_feedback=False)
+        confirm.assert_called_once()
+        self.assertEqual(result["skipped"], 0)
+        self.assertNotEqual(changed["sha256"], old_hash)
+        self.assertFalse(deselected["upload_sel"])
+        self.assertTrue(ui.preview_bundle(a.bundle)["ready"])
+
+    def test_recovery_retry_requires_current_batch_and_account(self):
+        a = self.app
+        a.add_pdfs([str(self.f)])
+        a.ip_var.set("192.0.2.22")
+        a.user_var.set("operator")
+        item = a.items[0]
+        item["status"] = "上传完成"
+        settings = a._build_settings()
+        current_digest = ui.content_digest(a.bundle, settings)
+        other_digest = ui.content_digest(a.bundle, {**settings, "user": "other"})
+        row = {"kind": "upload", "key": item["code"], "item_code": item["code"]}
+        for digest in (other_digest, current_digest):
+            with self.subTest(digest=digest):
+                task = {"task_id": "test-task", "digest": digest}
+                with (
+                    patch.object(ui.journal_module, "TaskJournal") as make_journal,
+                    patch.object(ui, "choose_pending_recovery_action",
+                                 return_value=("no_write_retry", [(task, row)])),
+                    patch.object(a, "after") as after,
+                ):
+                    journal = make_journal.return_value
+                    journal.list_tasks_with_pending_operations.return_value = [task]
+                    journal.pending_operations.return_value = [row]
+                    a.recover_pending()
+                    journal.resolve_operation.assert_called_once()
+                    if digest == current_digest:
+                        after.assert_called_once_with(0, a.start_upload)
+                        self.assertEqual(item["status"], "待上传")
+                    else:
+                        after.assert_not_called()
+                        self.assertEqual(item["status"], "上传完成")
+
     def test_one_click_normalize_records_fingerprint_for_changed_process_name(self):
         a=self.app
         source=Path(self.tmp.name)/'Z03.HG.010250A-11P03 空气压缩机.pdf'

@@ -254,7 +254,7 @@ class RecoveryVerifierTests(unittest.TestCase):
             ),
         )
         with self.assertRaisesRegex(
-            recovery_verifier.RecoveryEvidenceError, "类型不匹配"
+            recovery_verifier.RecoveryEvidenceError, "文档类型不符（实际 工艺文档，预期 图纸）"
         ):
             verifier.verify_upload(
                 {"kind": "upload", "item_code": "01.01"}

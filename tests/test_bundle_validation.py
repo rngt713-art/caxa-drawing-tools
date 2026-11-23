@@ -168,7 +168,7 @@ class FieldValidationTests(unittest.TestCase):
             "size": 0,
         }
         problems = drawing_bundle.item_problems(item, check_content=False)
-        self.assertTrue(any("成品代码" in problem for problem in problems))
+        self.assertTrue(any("所属整机或半成品图号" in problem for problem in problems))
 
     def test_kind_must_match_code_rule(self):
         item = {

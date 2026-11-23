@@ -1168,6 +1168,17 @@ class CaxaHelper
         }
     }
 
+    static bool FolderHasProduct(IEAPProductFolderEntity folder, int productId)
+    {
+        folder.Refresh();
+        foreach (var item in folder.RelatedProducts ?? new IEAPProductEntity[0])
+        {
+            if (item == null) throw new InvalidOperationException("unreadable folder product");
+            if (item.ObjectID == productId) return true;
+        }
+        return false;
+    }
+
     static Dictionary<string, object> CmdUnlinkProductFromFolder(Dictionary<string, object> a)
     {
         if (_svc == null || !_svc.HasLogin) return Err("not logged in");
@@ -1182,44 +1193,58 @@ class CaxaHelper
         {
             return Err("product folder not found: " + folderPath);
         }
-        bool linked = false;
-        try
-        {
-            foreach (var item in folder.RelatedProducts ?? new IEAPProductEntity[0])
-            {
-                if (item != null && item.ObjectID == productId)
-                {
-                    linked = true;
-                    break;
-                }
-            }
-        }
-        catch { }
+        bool linked = FolderHasProduct(folder, productId);
         if (linked)
         {
-            bool ok = folder.UnLinkProduct(product);
-            if (!ok) return Err("UnLinkProduct returned false");
-        }
-        bool remains = false;
-        try
-        {
-            foreach (var item in folder.RelatedProducts ?? new IEAPProductEntity[0])
+            var ids = new Dictionary<string, object>
             {
-                if (item != null && item.ObjectID == productId)
+                { "product", productId },
+                { "product_folder", folder.ObjectID }
+            };
+            string stage = "unlink_product_from_folder:unlink";
+            try
+            {
+                bool removed = folder.UnLinkProduct(product);
+                stage = "unlink_product_from_folder:verify";
+                if (FolderHasProduct(folder, productId))
                 {
-                    remains = true;
-                    break;
+                    return WriteError(removed
+                        ? "product-folder link still exists after unlink"
+                        : "UnLinkProduct returned false and the link still exists",
+                        stage, ids, productId);
                 }
             }
+            catch (Exception ex)
+            {
+                return WriteError("product-folder unlink could not be confirmed: " + ex.Message,
+                    stage, ids, productId, ex.ToString());
+            }
         }
-        catch { }
-        if (remains) return Err("product-folder unlink could not be read back");
         return Ok(new Dictionary<string, object>
         {
             { "product_id", productId },
             { "product_folder", matchedPath },
             { "was_linked", linked }
         });
+    }
+
+    static IEAPPrd2PartEntity FindProductRootLink(IEAPProductEntity product, int partId)
+    {
+        product.Refresh();
+        bool incomplete = false;
+        foreach (var link in product.RelatedRootParts((IEAPPrd2PartEntity)null) ??
+                 new IEAPPrd2PartEntity[0])
+        {
+            IEAPPartEntity part = link == null ? null : link.RefPart;
+            if (part == null || part.ObjectID <= 0)
+            {
+                incomplete = true;
+                continue;
+            }
+            if (part.ObjectID == partId) return link;
+        }
+        if (incomplete) throw new InvalidOperationException("unreadable product-part endpoint");
+        return null;
     }
 
     static Dictionary<string, object> CmdUnlinkProductPart(Dictionary<string, object> a)
@@ -1230,23 +1255,15 @@ class CaxaHelper
         IEAPProductEntity product = _svc.GetProduct(productId);
         IEAPPartEntity part = _svc.GetPart(partId);
         if (product == null || part == null) return Err("product/part not found");
-        IEAPPrd2PartEntity match = null;
-        try
-        {
-            foreach (var link in product.RelatedRootParts((IEAPPrd2PartEntity)null) ??
-                     new IEAPPrd2PartEntity[0])
-            {
-                if (link != null && link.RefPart != null &&
-                    link.RefPart.ObjectID == partId)
-                {
-                    match = link;
-                    break;
-                }
-            }
-        }
-        catch { }
+        IEAPPrd2PartEntity match = FindProductRootLink(product, partId);
         if (match != null)
         {
+            var ids = new Dictionary<string, object>
+            {
+                { "product", productId },
+                { "part", partId },
+                { "relation", match.ObjectID }
+            };
             bool ok = false;
             try { ok = product.UnLinkPart(part, match); } catch { }
             if (!ok)
@@ -1256,7 +1273,7 @@ class CaxaHelper
             if (!ok)
             {
                 // Some CAXA 2011 builds expose the relation but return
-                // “not implemented” for UnLinkPart.  Delete only the verified
+                // “not implemented” for UnLinkPart. Delete only the verified
                 // product-part relation object; never delete Product or Part.
                 try
                 {
@@ -1267,24 +1284,23 @@ class CaxaHelper
                 }
                 catch { }
             }
-            if (!ok) return Err("product-part relation could not be removed");
-        }
-        bool remains = false;
-        try
-        {
-            foreach (var link in product.RelatedRootParts((IEAPPrd2PartEntity)null) ??
-                     new IEAPPrd2PartEntity[0])
+
+            const string stage = "unlink_product_part:verify";
+            try
             {
-                if (link != null && link.RefPart != null &&
-                    link.RefPart.ObjectID == partId)
+                if (FindProductRootLink(product, partId) != null)
                 {
-                    remains = true;
-                    break;
+                    return WriteError(ok
+                        ? "product-part link still exists after unlink"
+                        : "product-part relation could not be removed", stage, ids, partId);
                 }
             }
+            catch (Exception ex)
+            {
+                return WriteError("product-part unlink could not be confirmed: " + ex.Message,
+                    stage, ids, partId, ex.ToString());
+            }
         }
-        catch { }
-        if (remains) return Err("product-part unlink could not be read back");
         return Ok(new Dictionary<string, object>
         {
             { "product_id", productId },
@@ -1302,11 +1318,12 @@ class CaxaHelper
         int childId = Convert.ToInt32(a["child_id"]);
         IEAPPartEntity parent = _svc.GetPart(parentId);
         if (parent == null) return Err("parent part not found: " + parentId);
+        parent.Refresh();
         IEAPPart2PartEntity match = null;
         foreach (var link in parent.Children(null) ?? new IEAPPart2PartEntity[0])
         {
-            if (link != null && link.ObjectID == linkId &&
-                link.RefSubPart != null && link.RefSubPart.ObjectID == childId)
+            if (link != null && link.ClassID == linkClassId &&
+                link.ObjectID == linkId && ReadPart2PartChildId(link, parentId) == childId)
             {
                 match = link;
                 break;
@@ -1316,39 +1333,41 @@ class CaxaHelper
         {
             return Err("part relation not found under parent: " + linkId);
         }
+        var ids = new Dictionary<string, object>
+        {
+            { "parent", parentId },
+            { "child", childId },
+            { "relation", linkId }
+        };
         _deleteDialogAutoConfirm = true;
         try { match.Delete(); }
         catch (Exception ex)
         {
-            return WriteError(
-                "part relation delete failed: " + ex.Message,
-                "unlink_part_relation:after_delete",
-                new Dictionary<string, object>
-                {
-                    { "parent", parentId },
-                    { "child", childId },
-                    { "relation", linkId }
-                },
-                linkId,
-                ex.ToString());
+            return WriteError("part relation delete failed: " + ex.Message,
+                "unlink_part_relation:after_delete", ids, linkId, ex.ToString());
         }
         finally { _deleteDialogAutoConfirm = false; }
-        try { parent.Refresh(); } catch { }
-        foreach (var link in parent.Children(null) ?? new IEAPPart2PartEntity[0])
+
+        const string stage = "unlink_part_relation:verify";
+        try
         {
-            if (link != null && link.ObjectID == linkId)
+            parent.Refresh();
+            foreach (var link in parent.Children(null) ?? new IEAPPart2PartEntity[0])
             {
-                return WriteError(
-                    "part relation still exists after delete",
-                    "unlink_part_relation:verify",
-                    new Dictionary<string, object>
-                    {
-                        { "parent", parentId },
-                        { "child", childId },
-                        { "relation", linkId }
-                    },
-                    linkId);
+                if (link == null)
+                {
+                    throw new InvalidOperationException("unreadable Part2Part relation");
+                }
+                if (link.ClassID == linkClassId && link.ObjectID == linkId)
+                {
+                    return WriteError("part relation still exists after delete", stage, ids, linkId);
+                }
             }
+        }
+        catch (Exception ex)
+        {
+            return WriteError("part relation delete could not be confirmed: " + ex.Message,
+                stage, ids, linkId, ex.ToString());
         }
         return Ok(new Dictionary<string, object>
         {
@@ -1444,7 +1463,9 @@ class CaxaHelper
         int id = Convert.ToInt32(a["part_id"]);
         IEAPPartEntity pt = _svc.GetPart(id);
         if (pt == null) return Err("part not found: " + id);
-        try { pt.Refresh(); } catch { }
+        string refreshError = null;
+        try { pt.Refresh(); }
+        catch (Exception ex) { refreshError = ex.Message; }
         var res = new Dictionary<string, object>
         {
             { "part_id", pt.ObjectID },
@@ -1452,6 +1473,7 @@ class CaxaHelper
             { "name", pt.Name },
             { "is_borrowed", pt.IsBorrowed }
         };
+        if (refreshError != null) res["refresh_error"] = refreshError;
         var children = new List<object>();
         try
         {
@@ -3590,18 +3612,52 @@ class CaxaHelper
         IEAPPartEntity parent,
         int childId)
     {
-        if (parent == null) return null;
-        try { parent.Refresh(); } catch { }
-        foreach (var link in parent.Children(null) ??
-                 new IEAPPart2PartEntity[0])
+        parent.Refresh();
+        int parentId = parent.ObjectID;
+        bool incomplete = false;
+        foreach (var link in parent.Children(null) ?? new IEAPPart2PartEntity[0])
         {
-            if (link != null &&
-                link.RefSubPart != null &&
-                link.RefSubPart.ObjectID == childId)
+            int? linkedChildId = ReadPart2PartChildId(link, parentId);
+            if (!linkedChildId.HasValue)
             {
-                return link;
+                incomplete = true;
+                continue;
+            }
+            if (linkedChildId.Value == childId) return link;
+        }
+        if (incomplete) throw new InvalidOperationException("unreadable Part2Part endpoint");
+        return null;
+    }
+
+    static int? ReadPart2PartChildId(IEAPPart2PartEntity link, int parentId)
+    {
+        if (link == null) return null;
+        try
+        {
+            IEAPPartEntity child = link.RefSubPart;
+            if (child != null && child.ObjectID > 0) return child.ObjectID;
+        }
+        catch { }
+
+        // Some CAXA 2011 clients cannot expose RefSubPart on an existing
+        // relation. Read the exact relation's endpoints via the object store.
+        try
+        {
+            var engine = CAXA.A5.EAP.CommonLibrary.EAPLibEngine.Instance;
+            var session = engine != null ? engine.CurSession : null;
+            if (session == null) return null;
+            var rawLink = session.ObjectStore.RetrieveObject(link.ClassID, link.ObjectID)
+                as CAXA.A5.EAP.CommonLibrary.Session.ObjectStore.ICaxLinkObject;
+            if (rawLink == null) return null;
+            var roleA = rawLink.RoleAObject;
+            var roleB = rawLink.RoleBObject;
+            if (roleA != null && roleA.ObjectId == parentId &&
+                roleB != null && roleB.ObjectId > 0)
+            {
+                return roleB.ObjectId;
             }
         }
+        catch { }
         return null;
     }
 
@@ -3663,7 +3719,18 @@ class CaxaHelper
                               as CAXA.A5.EAP.CommonLibrary.Session.ObjectStore.ICaxObject;
                 if (prodObj == null || partObj == null) return Err("LinkRelatedPart returned null（对象不可用）");
                 var newLink = store.NewOneLevelLink(linkClassId, prodObj, partObj, null);
-                newLink.Insert();
+                if (!newLink.Insert())
+                {
+                    return WriteError(
+                        "product-part link insert returned false",
+                        "link_part:product_low",
+                        new Dictionary<string, object>
+                        {
+                            { "product", parentId },
+                            { "part", childId }
+                        },
+                        childId);
+                }
                 return Ok(new Dictionary<string, object> { { "link", "product_part_low" }, { "link_class", linkClassId } });
             }
             catch (Exception ex)
@@ -3708,6 +3775,7 @@ class CaxaHelper
             {
                 try { cond2.Reference = false; } catch { }
                 try { cond2.AssemblyQuantity = quantity; } catch { }
+                string highError = null;
                 try
                 {
                     IEAPPart2PartEntity link2 = parent.LinkSubPart(child, cond2);
@@ -3723,22 +3791,22 @@ class CaxaHelper
                 }
                 catch (Exception ex)
                 {
-                    // LinkSubPart may have inserted the relation before the
-                    // exception.  Re-read first; only a confirmed absence is
-                    // safe to hand to the low-level fallback.
-                    IEAPPart2PartEntity afterException =
-                        FindPart2PartChild(parent, childId);
-                    if (afterException != null)
+                    highError = ex.Message;
+                }
+
+                // A null return or an exception can follow a completed write.
+                // FindPart2PartChild throws if absence cannot be established.
+                IEAPPart2PartEntity recoveredLink = FindPart2PartChild(parent, childId);
+                if (recoveredLink != null)
+                {
+                    return Ok(new Dictionary<string, object>
                     {
-                        return Ok(new Dictionary<string, object>
-                        {
-                            { "link", "part_part_after_exception" },
-                            { "link_id", afterException.ObjectID },
-                            { "reference", afterException.Reference },
-                            { "recovered_after_exception", true },
-                            { "high_error", ex.Message }
-                        });
-                    }
+                        { "link", highError == null ? "part_part_after_null" : "part_part_after_exception" },
+                        { "link_id", recoveredLink.ObjectID },
+                        { "reference", recoveredLink.Reference },
+                        { "recovered_after_exception", highError != null },
+                        { "high_error", highError ?? "" }
+                    });
                 }
             }
         }
@@ -3755,7 +3823,12 @@ class CaxaHelper
                            as CAXA.A5.EAP.CommonLibrary.Session.ObjectStore.ICaxObject;
             if (parentObj == null || childObj == null) return Err("part link: 对象不可用");
             var newLink = store.NewOneLevelLink(1037, parentObj, childObj, null);
-            try { newLink.SetValue("Reference", reference); } catch { }
+            try { newLink.SetValue("Reference", reference); }
+            catch (Exception ex)
+            {
+                // Borrowing must never fall through to the default ownership value.
+                if (reference) return Err("cannot set borrow Reference=True: " + ex.Message);
+            }
             try { newLink.SetValue("AssemblyQuantity", quantity); } catch { }
             bool inserted = newLink.Insert();
             if (!inserted) return Err("part link insert returned false");

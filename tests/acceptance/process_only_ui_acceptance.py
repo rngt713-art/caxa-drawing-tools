@@ -75,11 +75,11 @@ class ProcessOnlyUIAcceptance(unittest.TestCase):
             app.tree.parent(iid) == product_iid for iid in document_iids
         ))
 
-        app.tree.selection_set(document_iids[0])
-        app._on_tree_selection_changed()
-        self.assertEqual(app._series_product_code, machine)
-        app.series_product_var.set("HW2.5-40")
-        app._on_series_product_name_changed()
+        with patch.object(app.tree, "bbox", return_value=(5, 5, 300, 28)):
+            app._begin_inline_edit(product_iid, mode="product")
+        app._inline_editor.insert(0, "HW2.5-40")
+        app._commit_inline_edit()
+        app.normalize_filenames(show_feedback=False)
         self.assertTrue(all(
             item.get("series_product_name") == "HW2.5-40"
             for item in app.items

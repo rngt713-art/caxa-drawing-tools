@@ -293,7 +293,8 @@ class UpdateCheckerTests(unittest.TestCase):
 
     def test_apply_update_waits_replaces_old_exe_and_relaunches(self):
         class Process:
-            pass
+            def poll(self):
+                return None
 
         events = []
         with _support.temp_dir("update_apply_") as directory:
@@ -317,6 +318,7 @@ class UpdateCheckerTests(unittest.TestCase):
                 source_exe=source,
                 wait_exit=wait_exit,
                 popen=popen,
+                sleep=lambda seconds: events.append(("sleep", seconds)),
             )
             self.assertIsInstance(process, Process)
             self.assertEqual(Path(old).read_bytes(), b"new-version")
@@ -324,6 +326,30 @@ class UpdateCheckerTests(unittest.TestCase):
         self.assertEqual(events[0], ("wait", 456))
         self.assertEqual(events[1][0], "launch")
         self.assertEqual(events[1][1], [os.path.abspath(old)])
+        self.assertEqual(events[2], ("sleep", 1.2))
+
+    def test_failed_final_restart_restores_old_exe(self):
+        class FailedProcess:
+            def poll(self):
+                return 7
+
+        with _support.temp_dir("update_restart_failure_") as directory:
+            old = Path(directory) / "installed.exe"
+            old.write_bytes(b"old-version")
+            source = Path(directory) / "new-version.exe"
+            source.write_bytes(b"new-version")
+
+            with self.assertRaisesRegex(update_checker.UpdateError, "退出码 7"):
+                update_checker.apply_update(
+                    old,
+                    456,
+                    source_exe=source,
+                    wait_exit=lambda _pid: None,
+                    popen=lambda _args, **_kwargs: FailedProcess(),
+                    sleep=lambda _seconds: None,
+                )
+            self.assertEqual(old.read_bytes(), b"old-version")
+            self.assertEqual(source.read_bytes(), b"new-version")
 
     def test_pyinstaller_environment_is_removed_before_restart(self):
         with patch.dict(

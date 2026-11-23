@@ -258,6 +258,29 @@ class RelationReadbackTests(unittest.TestCase):
         self.assertEqual(result["verified"], 1)
         self.assertEqual(result["issues"][0]["reason"], "unreadable_parent")
 
+    def test_incomplete_read_never_proves_a_missing_link(self):
+        uploader = self.uploader()
+        uploader.find_part = lambda code: {"object_id": {"01.P": 1, "01.A": 2}[code]}
+        expected = [support.relation("01.P", "01.A", "borrow")]
+        for info in ({"link_endpoints": []}, {"refresh_error": "stale parent", "children": []},
+                     {"children": [{"sub_id": None}], "link_endpoints": [{"link_error": "stale link"}]}):
+            with self.subTest(info=info):
+                uploader.part_info = lambda _parent: info
+                self.assertEqual(
+                    uploader.verify_relation_pairs(expected)["issues"][0]["reason"],
+                    "unreadable_parent",
+                )
+                with self.assertRaises(CaxaError):
+                    uploader._child_link_state(1, 2)
+
+    def test_positive_low_level_relation_remains_valid_when_child_pointer_is_missing(self):
+        uploader = self.uploader()
+        uploader.part_info = lambda _parent: {
+            "children": [{"sub_id": None, "reference": True}],
+            "link_endpoints": [{"roleA": {"object_id": 1}, "roleB": {"object_id": 2}, "reference": True}],
+        }
+        self.assertEqual(uploader._child_link_state(1, 2), (True, True))
+
     def test_read_error_after_link_is_pending_not_safe_to_replay(self):
         uploader = self.uploader()
         uploader.find_part = lambda code: {"object_id": 1 if code == "01.P" else 2}

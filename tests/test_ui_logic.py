@@ -1,6 +1,8 @@
 """User-facing labels must not leak implementation policy names."""
 
 import json
+import os
+import tempfile
 import unittest
 
 import _support  # noqa: F401
@@ -11,12 +13,16 @@ class DuplicatePolicyLabelTests(unittest.TestCase):
     def test_policy_labels_are_chinese(self):
         self.assertEqual(
             upload_ui_logic.duplicate_policy_label("append_iteration"),
-            "追加新版次",
+            "升版",
         )
         self.assertEqual(
             upload_ui_logic.duplicate_policy_label("reuse"),
-            "已有则复用",
+            "复用",
         )
+
+    def test_legacy_labels_load_with_the_new_wording(self):
+        self.assertEqual(upload_ui_logic.duplicate_policy_label("追加新版次"), "升版")
+        self.assertEqual(upload_ui_logic.duplicate_policy_label("已有则复用"), "复用")
 
     def test_chinese_label_maps_back_to_internal_policy(self):
         self.assertEqual(
@@ -28,7 +34,7 @@ class DuplicatePolicyLabelTests(unittest.TestCase):
             port=8900,
             user="tester",
             password="unused",
-            duplicate_policy="追加新版次",
+            duplicate_policy="升版",
             start_workflow=False,
         )
         self.assertEqual(settings["duplicate_policy"], "append_iteration")
@@ -47,6 +53,36 @@ class DuplicatePolicyLabelTests(unittest.TestCase):
             upload_ui_logic.account_from(settings)["password"],
             "",
         )
+
+
+class PdfPathCollectionTests(unittest.TestCase):
+    def test_folder_scan_is_one_level_and_pdf_only(self):
+        with tempfile.TemporaryDirectory() as root:
+            top_pdf = os.path.join(root, "A.PDF")
+            ignored_text = os.path.join(root, "readme.txt")
+            nested = os.path.join(root, "nested")
+            os.mkdir(nested)
+            nested_pdf = os.path.join(nested, "nested.pdf")
+            for path in (top_pdf, ignored_text, nested_pdf):
+                with open(path, "wb") as stream:
+                    stream.write(b"test")
+
+            result = upload_ui_logic.collect_pdf_paths([root])
+
+            self.assertEqual(result["files"], [os.path.abspath(top_pdf)])
+            self.assertEqual(result["ignored"], 2)
+            self.assertEqual(result["errors"], [])
+
+    def test_direct_pdf_and_duplicate_folder_entry_are_deduplicated(self):
+        with tempfile.TemporaryDirectory() as root:
+            pdf = os.path.join(root, "A.pdf")
+            with open(pdf, "wb") as stream:
+                stream.write(b"test")
+
+            result = upload_ui_logic.collect_pdf_paths([pdf, root, pdf])
+
+            self.assertEqual(result["files"], [os.path.abspath(pdf)])
+            self.assertEqual(result["ignored"], 0)
 
 
 class RecoveryOperationLabelTests(unittest.TestCase):
@@ -79,7 +115,7 @@ class RecoveryOperationLabelTests(unittest.TestCase):
         )
         self.assertIn("操作：次级/借用关系", text)
         self.assertIn("对象：03.HW.001 ← 04.001", text)
-        self.assertIn("阶段：关系建链回读", text)
+        self.assertIn("阶段：核实归属或借用关系", text)
         self.assertNotIn("relation", text)
 
     def test_workflow_prefers_instance_status_and_document_count(self):
