@@ -797,6 +797,98 @@ class CaxaHelper
         return "";
     }
 
+    static IEAPProductFolderEntity FindScopedProductFolder(
+        IEAPProductFolderEntity folder,
+        string targetPath,
+        string parentPath,
+        ref string readError)
+    {
+        if (folder == null) return null;
+        try
+        {
+            string name = (folder.Name ?? "").Trim();
+            string path = NormalizeProductFolderPath(parentPath + "/" + name);
+            bool singleName = !targetPath.Contains("/");
+            if (string.Equals(path, targetPath, StringComparison.OrdinalIgnoreCase) ||
+                (singleName &&
+                 (string.Equals(name, targetPath, StringComparison.OrdinalIgnoreCase) ||
+                  string.Equals((folder.IdentityNo ?? "").Trim(), targetPath,
+                                StringComparison.OrdinalIgnoreCase))))
+            {
+                return folder;
+            }
+            if (!singleName && path.Length > 0 &&
+                !targetPath.StartsWith(path + "/", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+            foreach (var child in folder.Children ?? new IEAPProductFolderEntity[0])
+            {
+                var found = FindScopedProductFolder(child, targetPath, path, ref readError);
+                if (found != null) return found;
+            }
+        }
+        catch (Exception ex)
+        {
+            if (readError == null) readError = ex.Message;
+        }
+        return null;
+    }
+
+    static Dictionary<string, object> FindProductInFolderRecursive(
+        IEAPProductFolderEntity folder,
+        string identity,
+        string parentPath,
+        ref string readError)
+    {
+        if (folder == null) return null;
+        string path = parentPath;
+        try
+        {
+            path = NormalizeProductFolderPath(parentPath + "/" + folder.Name);
+            foreach (var product in folder.RelatedProducts ?? new IEAPProductEntity[0])
+            {
+                if (product == null) continue;
+                try
+                {
+                    string productIdentity = (product.IdentityNo ?? "").Trim();
+                    if (!string.Equals(productIdentity, identity, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    return new Dictionary<string, object>
+                    {
+                        { "object_id", product.ObjectID },
+                        { "identity", productIdentity },
+                        { "name", product.Name },
+                        { "product_path", path }
+                    };
+                }
+                catch (Exception ex)
+                {
+                    if (readError == null) readError = ex.Message;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            if (readError == null) readError = ex.Message;
+        }
+        try
+        {
+            foreach (var child in folder.Children ?? new IEAPProductFolderEntity[0])
+            {
+                var found = FindProductInFolderRecursive(child, identity, path, ref readError);
+                if (found != null) return found;
+            }
+        }
+        catch (Exception ex)
+        {
+            if (readError == null) readError = ex.Message;
+        }
+        return null;
+    }
+
     static string NormalizeProductFolderPath(string value)
     {
         return string.Join("/",
@@ -1063,6 +1155,47 @@ class CaxaHelper
                 { "name", folder.Name },
                 { "path", matchedPath }
             });
+        }
+        return Ok(new Dictionary<string, object> { { "found", found } });
+    }
+
+    static Dictionary<string, object> CmdFindProductInFolder(Dictionary<string, object> a)
+    {
+        if (_svc == null || !_svc.HasLogin) return Err("not logged in");
+        string identity = Convert.ToString(a["identity"]).Trim();
+        string folderPath = NormalizeProductFolderPath(Convert.ToString(a["folder_path"]));
+        var found = new List<object>();
+        if (identity.Length == 0 || folderPath.Length == 0)
+        {
+            return Ok(new Dictionary<string, object> { { "found", found } });
+        }
+
+        string readError = null;
+        try
+        {
+            foreach (var root in _svc.GetAllRootProductFolders() ?? new IEAPProductFolderEntity[0])
+            {
+                var folder = FindScopedProductFolder(root, folderPath, "", ref readError);
+                if (folder == null) continue;
+                var product = FindProductInFolderRecursive(folder, identity, "", ref readError);
+                if (product != null)
+                {
+                    product["folder_path"] = folderPath;
+                    found.Add(product);
+                }
+                break;
+            }
+        }
+        catch (Exception ex)
+        {
+            if (readError == null) readError = ex.Message;
+        }
+        if (found.Count == 0 && readError != null)
+        {
+            var failure = Err("读取系列目录产品失败，无法确认该产品是否存在：" + folderPath);
+            failure["stage"] = "product_folder_read";
+            failure["detail"] = readError;
+            return failure;
         }
         return Ok(new Dictionary<string, object> { { "found", found } });
     }
@@ -3889,6 +4022,8 @@ class CaxaHelper
                             resp = CmdDumpProductById(req); break;
                         case "find_product": resp = CmdFindProduct(req); break;
                         case "find_product_folder": resp = CmdFindProductFolder(req); break;
+                        case "find_product_in_folder":
+                            resp = CmdFindProductInFolder(req); break;
                         case "ensure_product_folder":
                             resp = CmdEnsureProductFolder(req); break;
                         case "link_product_to_folder":

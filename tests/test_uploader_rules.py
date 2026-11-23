@@ -54,7 +54,7 @@ class RuleBridge:
             return {"ok": True, "drawings": []}
         if name == "query_parts":
             return {"ok": True, "items": []}
-        if name == "find_product":
+        if name in ("find_product", "find_product_in_folder"):
             return {"ok": True, "found": []}
         if name == "find_product_folder":
             keyword = cmd.get("keyword")
@@ -413,6 +413,67 @@ class OwnBorrowTests(unittest.TestCase):
         self.assertFalse(
             any(call.get("cmd") == "find_product" for call in bridge.calls)
         )
+
+    def test_exact_query_miss_uses_folder_scoped_product_search(self):
+        class NestedProductBridge(RuleBridge):
+            def call(self, cmd, timeout=240.0, idempotent=None):
+                if cmd.get("cmd") == "query_objects":
+                    self.calls.append(cmd)
+                    return {"ok": True, "items": []}
+                if cmd.get("cmd") == "find_product_in_folder":
+                    self.calls.append(cmd)
+                    return {
+                        "ok": True,
+                        "found": [
+                            {
+                                "object_id": 90350,
+                                "identity": "03.HT.HGB01-06350G",
+                                "name": "氩气压缩机",
+                            }
+                        ],
+                    }
+                return super().call(cmd, timeout, idempotent)
+
+        bridge = NestedProductBridge()
+        uploader = CaxaUploader(
+            bridge,
+            staging_dir=staging.TaskStaging(
+                root=os.path.join(_support.BASE_TMP, "nested_" + uuid.uuid4().hex[:8])
+            ),
+        )
+        product = uploader.find_product_for_machine(
+            "03.HT.HGB01-06350G",
+            product_folder="HT合同特殊/HGB系列",
+        )
+        self.assertEqual(product["object_id"], 90350)
+        self.assertTrue(product["found_in_folder"])
+        self.assertIn(
+            {
+                "cmd": "find_product_in_folder",
+                "identity": "03.HT.HGB01-06350G",
+                "folder_path": "HT合同特殊/HGB系列",
+            },
+            bridge.calls,
+        )
+        self.assertFalse(any(call.get("cmd") == "find_product" for call in bridge.calls))
+
+    def test_nested_product_incomplete_read_cannot_trigger_creation(self):
+        class NestedProductBridge(RuleBridge):
+            def call(self, cmd, timeout=240.0, idempotent=None):
+                if cmd["cmd"] == "find_product_in_folder":
+                    self.calls.append(cmd)
+                    return {"ok": True}  # invalid reply, not an empty result
+                return super().call(cmd, timeout, idempotent)
+
+        bridge = NestedProductBridge()
+        uploader = CaxaUploader(bridge)
+        with self.assertRaises(CaxaError) as error:
+            uploader.ensure_machine(
+                "03.HT.HGB01-06350G", product_name="有效产品名",
+                product_folder="HT合同特殊/HGB系列",
+            )
+        self.assertEqual(error.exception.stage, "product_folder_read")
+        self.assertFalse(any(call["cmd"] == "create_product" for call in bridge.calls))
 
     def test_missing_product_folder_blocks_product_creation(self):
         class MissingFolderBridge(RuleBridge):

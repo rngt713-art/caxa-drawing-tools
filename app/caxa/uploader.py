@@ -204,11 +204,10 @@ class CaxaUploader:
                 stage="product_identity_duplicate",
             )
 
-        # Exact numeric/drawing identities do not need a whole-tree name scan.
-        # Keep the tree search only for the rare callers that query by a
-        # human-readable Product name.
+        # Numeric/drawing identities stay on the indexed path.  A nested
+        # ProductFolder lookup is handled by find_product_in_folder() only when
+        # the caller knows the target folder.
         if identity[0].isdigit():
-            self.log("未找到整机产品 %s" % identity)
             return None
 
         r = self.bridge.call(
@@ -229,6 +228,46 @@ class CaxaUploader:
                 return p
         self.log("未找到整机产品 %s，候选：%s" % (
             identity, [(x.get("identity"), x.get("name")) for x in found[:10]]))
+        return None
+
+    def find_product_in_folder(self, identity: str, folder_path: str):
+        """Find an exact Product inside one ProductFolder subtree.
+
+        This is the bounded fallback for products nested under folders: it
+        scans only the requested folder tree instead of all Products.
+        """
+        identity = str(identity or "").strip().upper()
+        folder_path = str(folder_path or "").strip().replace("\\", "/").strip("/")
+        if not identity or not folder_path:
+            return None
+        result = self.bridge.call(
+            {
+                "cmd": "find_product_in_folder",
+                "identity": identity,
+                "folder_path": folder_path,
+            }
+        )
+        found = result.get("found")
+        if not isinstance(found, list):
+            raise CaxaError(
+                "CAXA 未返回完整的系列目录产品查询结果：%s" % folder_path,
+                stage="product_folder_read",
+            )
+        if len(found) > 1:
+            raise CaxaError(
+                "图号 %s 在系列目录 %s 下对应 %d 个产品，请先人工清理重复产品"
+                % (identity, folder_path, len(found)),
+                stage="product_identity_duplicate",
+            )
+        if len(found) == 1:
+            product = {
+                "object_id": int(found[0]["object_id"]),
+                "identity": identity,
+                "name": found[0].get("name") or "",
+                "found_in_folder": True,
+            }
+            self._product_cache[identity] = dict(product)
+            return product
         return None
 
     def find_products_by_name(self, name: str) -> list[dict]:
@@ -298,11 +337,14 @@ class CaxaUploader:
         """
         machine = str(machine or "").strip().upper()
         product = self.find_product(machine)
+        if product is None:
+            product = self.find_product_in_folder(machine, product_folder)
         if product is not None:
             return product
 
         name = str(product_name or "").strip()
         if not name:
+            self.log("未找到整机产品 %s" % machine)
             return None
         candidates = self.find_products_by_name(name)
         if not candidates:

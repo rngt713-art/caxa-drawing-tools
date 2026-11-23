@@ -108,7 +108,7 @@ def series_product_folder(machine_code: str) -> str:
         return ""
     series = match.group(1)
     if series == "HT":
-        if re.match(r"^03\.HT\.HGB(?:[.\-]|$)", machine):
+        if machine.startswith("03.HT.HGB"):
             return "HT合同特殊/HGB系列"
         return "HT合同特殊"
     if series == "GPZ":
