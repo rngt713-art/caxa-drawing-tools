@@ -74,7 +74,7 @@ APP_DIR = (
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 
 DEFAULTS = {
-    "caxa_server_ip": "192.168.1.28",
+    "caxa_server_ip": "",
     "caxa_server_port": 8900,
     "caxa_user": "",
     "caxa_password_enc": "",

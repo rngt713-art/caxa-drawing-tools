@@ -414,7 +414,15 @@ def apply_update(
             shutil.copy2(old, backup)
             if _sha256_file(backup) != _sha256_file(old):
                 raise UpdateError("旧 EXE 备份校验失败")
-        os.replace(temporary, old)
+        # The PyInstaller bootloader can still hold the EXE after the GUI exits.
+        for attempt in range(16):
+            try:
+                os.replace(temporary, old)
+                break
+            except OSError as exc:
+                if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 15:
+                    raise
+                sleep(0.2)
         replaced = True
         if _sha256_file(old) != _sha256_file(source):
             raise UpdateError("覆盖后的 EXE 校验失败")

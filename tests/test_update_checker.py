@@ -351,6 +351,59 @@ class UpdateCheckerTests(unittest.TestCase):
             self.assertEqual(old.read_bytes(), b"old-version")
             self.assertEqual(source.read_bytes(), b"new-version")
 
+    def test_apply_update_retries_transient_windows_replace_error(self):
+        real_replace = os.replace
+        error = PermissionError("old EXE is still in use")
+        error.winerror = 5
+
+        with _support.temp_dir("update_locked_") as directory:
+            old = Path(directory) / "installed.exe"
+            old.write_bytes(b"old-version")
+            source = Path(directory) / "new-version.exe"
+            source.write_bytes(b"new-version")
+            process = unittest.mock.Mock()
+            process.poll.return_value = None
+            sleep_calls = []
+            failures = iter([error, error])
+
+            def replace_after_release(temporary, target):
+                failure = next(failures, None)
+                if failure is not None:
+                    raise failure
+                real_replace(temporary, target)
+
+            with patch.object(os, "replace", side_effect=replace_after_release):
+                _, backup = update_checker.apply_update(
+                    old, 456, source_exe=source, wait_exit=lambda _pid: None,
+                    popen=lambda *_args, **_kwargs: process, sleep=sleep_calls.append,
+                )
+            self.assertEqual(old.read_bytes(), b"new-version")
+            self.assertEqual(backup.read_bytes(), b"old-version")
+            self.assertEqual(sleep_calls, [0.2, 0.2, 1.2])
+
+    def test_apply_update_stops_retrying_permanent_windows_replace_error(self):
+        error = PermissionError("access denied")
+        error.winerror = 5
+
+        with _support.temp_dir("update_denied_") as directory:
+            old = Path(directory) / "installed.exe"
+            old.write_bytes(b"old-version")
+            source = Path(directory) / "new-version.exe"
+            source.write_bytes(b"new-version")
+            popen = unittest.mock.Mock()
+            sleep_calls = []
+            with patch.object(os, "replace", side_effect=error) as replace:
+                with self.assertRaises(PermissionError):
+                    update_checker.apply_update(
+                        old, 456, source_exe=source, wait_exit=lambda _pid: None,
+                        popen=popen, sleep=sleep_calls.append,
+                    )
+                self.assertEqual(replace.call_count, 16)
+            self.assertEqual(old.read_bytes(), b"old-version")
+            self.assertEqual(list(Path(directory).glob("*.tmp")), [])
+            self.assertEqual(sleep_calls, [0.2] * 15)
+            popen.assert_not_called()
+
     def test_pyinstaller_environment_is_removed_before_restart(self):
         with patch.dict(
             os.environ,
