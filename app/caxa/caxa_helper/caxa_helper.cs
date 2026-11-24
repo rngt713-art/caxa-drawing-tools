@@ -2626,12 +2626,14 @@ class CaxaHelper
     // 上传期间只允许本 helper 进程自己的导入对话框被自动确认。
     static volatile bool _loginInProgress = false;
     static volatile bool _uploadInProgress = false;
+    static volatile int _uploadSequence = 0;
     static volatile int _uploadCurrentObjectId = 0;
 
     static Dictionary<string, object> CmdUpload(Dictionary<string, object> a)
     {
         // Object evidence belongs to this command, never to the previous PDF.
         _uploadCurrentObjectId = 0;
+        _uploadSequence++;
         _uploadInProgress = true;
         try
         {
@@ -3602,25 +3604,29 @@ class CaxaHelper
 
             stage = "link_documents";
             var linkIds = new List<int>();
+            result["document_link_ids"] = linkIds;
             foreach (int drawingId in uniqueDrawingIds)
             {
                 int classId = classIdByDocumentId[drawingId];
+                result["failed_drawing_id"] = drawingId;
+                result["failed_document_class_id"] = classId;
                 var drawingObject = store.RetrieveObject((short)classId, drawingId)
                     as CAXA.A5.EAP.CommonLibrary.Session.ObjectStore.ICaxObject;
                 if (drawingObject == null)
                 {
-                    result["failed_drawing_id"] = drawingId;
-                    result["failed_document_class_id"] = classId;
-                    result["document_link_ids"] = linkIds;
                     return fail(
                         "document object not retrievable: class=" + classId +
                         ", id=" + drawingId);
                 }
                 var link = store.NewOneLevelLink(3305, processObject, drawingObject, null);
-                link.Insert();
+                if (link == null)
+                    return fail("document link creation returned null: drawing_id=" + drawingId);
+                if (!link.Insert())
+                    return fail("document link insert returned false: drawing_id=" + drawingId);
                 try { linkIds.Add(link.ObjectId); } catch { }
             }
-            result["document_link_ids"] = linkIds;
+            result.Remove("failed_drawing_id");
+            result.Remove("failed_document_class_id");
 
             stage = "designate_performer";
             process.designate_dynamic_performer(
@@ -4350,8 +4356,10 @@ class CaxaHelper
             ConfirmLog("auto-confirmer thread started（默认空闲，等待 set_auto_confirm）");
             IntPtr lastDel = IntPtr.Zero;
             IntPtr lastDup = IntPtr.Zero;
+            bool dupCheckboxHandled = false;
             IntPtr lastImport = IntPtr.Zero;
             IntPtr lastSameUserLogin = IntPtr.Zero;
+            int lastUploadSequence = -1;
             int ticks = 0;
             while (true)
             {
@@ -4398,6 +4406,12 @@ class CaxaHelper
                     if (sameUser == IntPtr.Zero) lastSameUserLogin = IntPtr.Zero;
 
                     // 1) 重复对象对话框：只在本次请求窗口内、且属于已锁定进程时处理
+                    int uploadSequence = _uploadSequence;
+                    if (uploadSequence != lastUploadSequence)
+                    {
+                        lastUploadSequence = uploadSequence;
+                        lastDup = IntPtr.Zero;
+                    }
                     string dupTexts;
                     uint dupPid;
                     IntPtr dup = FindDupDialog(out dupTexts, out dupPid);
@@ -4412,22 +4426,30 @@ class CaxaHelper
                         if (dup != lastDup)
                         {
                             lastDup = dup;
+                            dupCheckboxHandled = false;
                             ConfirmLog("发现重复对象对话框 hwnd=" + dup + " pid=" + dupPid
                                        + " 标题=" + SafeWindowTitle(dup) + " 控件=" + dupTexts);
-                            bool selected = SelectOptionAndVerify(dup, "追加新的版次");
-                            ConfirmLog("“在现有版本上追加新的版次”选中=" + selected);
-                            if (!selected)
-                            {
-                                // 选项不明或没能确认选中：不点“确定”
-                                System.Threading.Thread.Sleep(300);
-                                continue;
-                            }
+                        }
+                        // 每次点击“确定”前都回读选项。同一窗口句柄也可能仍未选中。
+                        bool selected = SelectOptionAndVerify(dup, "追加新的版次");
+                        ConfirmLog("“在现有版本上追加新的版次”选中=" + selected);
+                        if (!selected)
+                        {
+                            System.Threading.Thread.Sleep(300);
+                            continue;
+                        }
+                        if (!dupCheckboxHandled)
+                        {
                             System.Threading.Thread.Sleep(120);
                             bool all = SetCheckBoxChecked(dup, "应用到所有");
                             ConfirmLog("“应用到所有”点击=" + all);
+                            dupCheckboxHandled = true;
                         }
-                        bool okBtn = ClickButton(dup, "确定");
-                        ConfirmLog("重复对象对话框“确定”点击=" + okBtn + " hwnd=" + dup);
+                        if (uploadSequence == _uploadSequence && IsAutoTargetAllowed(dupPid))
+                        {
+                            bool okBtn = ClickButton(dup, "确定");
+                            ConfirmLog("重复对象对话框“确定”点击=" + okBtn + " hwnd=" + dup);
+                        }
                     }
                     else
                     {

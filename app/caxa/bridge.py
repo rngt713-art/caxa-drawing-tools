@@ -10,7 +10,7 @@ Rules encoded here:
   and then failed halfway is visible instead of being reduced to a string;
 * non-idempotent writes are never retried blindly: a timeout or a lost reply
   raises an error marked ``response_lost`` so the caller can mark the operation
-  "待核实" instead of replaying it.
+  "待核实" instead of replaying it; unknown commands use the same policy.
 """
 
 from __future__ import annotations
@@ -24,26 +24,32 @@ import threading
 
 HELPER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "caxa_helper", "caxa_helper.exe")
 
-#: Commands that create or change remote state.  Never retried automatically.
-WRITE_COMMANDS = frozenset(
+#: Helper queries that can be safely replayed after a lost response.
+READ_COMMANDS = frozenset(
     {
-        "upload",
-        "create_part",
-        "ensure_part_material_code",
-        "create_product",
-        "ensure_product_folder",
-        "link_product_to_folder",
-        "unlink_product_from_folder",
-        "unlink_product_part",
-        "unlink_part_relation",
-        "link_part",
-        "reference",
-        "start_workflow",
-        "new_release",
-        "release_drawing",
-        "set_part",
-        "set_drawing",
-        "delete_drawing",
+        "class_attributes",
+        "class_info",
+        "drawing_history",
+        "dump_product",
+        "dump_product_by_id",
+        "dump_tree",
+        "dump_windows",
+        "find",
+        "find_part",
+        "find_part_in_product",
+        "find_product",
+        "find_product_folder",
+        "find_product_in_folder",
+        "list_products",
+        "part_drawings",
+        "part_info",
+        "product_root_part",
+        "query_links",
+        "query_objects",
+        "query_parts",
+        "related_objects",
+        "wf_dal_probe",
+        "workflow_info",
     }
 )
 
@@ -305,7 +311,7 @@ class CaxaBridge:
     # ---------- command dispatch ----------
     def call(self, cmd: dict, timeout: float = 240.0, idempotent: bool | None = None) -> dict:
         if idempotent is None:
-            idempotent = cmd.get("cmd") not in WRITE_COMMANDS
+            idempotent = cmd.get("cmd") in READ_COMMANDS
         attempts = 2 if idempotent else 1
         stage = str(cmd.get("cmd") or "")
         with self._lock:
@@ -410,6 +416,7 @@ class CaxaBridge:
         request_id: str = "",
         target_name: str = "",
     ) -> dict:
+        # This setting only affects the helper process that receives it.
         return self.call(
             {
                 "cmd": "set_auto_confirm",
@@ -419,6 +426,7 @@ class CaxaBridge:
                 "target_name": target_name or "",
             },
             timeout=30.0,
+            idempotent=True,
         )
 
     def dump_tree(self, max_depth: int = 6) -> dict:

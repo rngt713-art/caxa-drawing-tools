@@ -35,6 +35,7 @@ using System;
 using System.Collections.Generic;
 class Harness {
     static volatile bool _uploadInProgress = false;
+    static volatile int _uploadSequence = 0;
     static volatile int _uploadCurrentObjectId = 0;
     static Dictionary<string, object> Err(string error) {
         return new Dictionary<string, object> { { "ok", false }, { "error", error } };
@@ -53,7 +54,7 @@ class Harness {
         var next = new Dictionary<string, object> { { "fail", true } };
         if (args[0] == "known") next["object_id"] = 202;
         var result = CmdUpload(next);
-        if (_uploadInProgress || (bool)result["ok"] || !(bool)result["uncertain"])
+        if (_uploadInProgress || _uploadSequence != 2 || (bool)result["ok"] || !(bool)result["uncertain"])
             return 1;
         if (args[0] == "known")
             return result.ContainsKey("object_id") && (int)result["object_id"] == 202 ? 0 : 2;
