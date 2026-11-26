@@ -157,18 +157,293 @@ class CaxaUploader:
         self._owns_staging = False
         self._general_product = None
         self._product_cache: dict[str, dict] = {}
+        self._product_index: list[dict] | None = None
+        self._product_index_complete = False
+        self._root_part_index_complete = False
+        self._product_index_errors: list[dict] = []
+        self._product_root_parts: dict[int, list[dict]] = {}
+        self._product_folder_paths_cache: dict[int, dict] = {}
         self._part_cache: dict[str, dict] = {}
         self._machine_part_cache: dict[tuple[int, str], dict] = {}
         self._product_folder_links: set[tuple[int, str]] = set()
 
     # ---------- basic queries ----------
+    @staticmethod
+    def _normalize_product_folder_path(value) -> str:
+        return "/".join(
+            part.strip()
+            for part in str(value or "").replace("\\", "/").split("/")
+            if part.strip()
+        )
+
+    @classmethod
+    def _product_folder_paths(cls, item: dict) -> list[str]:
+        paths = []
+        values = item.get("folder_paths")
+        if not isinstance(values, (list, tuple)):
+            values = []
+        for value in list(values) + [item.get("folder_path")]:
+            path = cls._normalize_product_folder_path(value)
+            if path and path.casefold() not in {
+                existing.casefold() for existing in paths
+            }:
+                paths.append(path)
+        return paths
+
+    @classmethod
+    def _product_with_folder(cls, item: dict, requested_folder: str = "") -> dict:
+        product = dict(item)
+        paths = cls._product_folder_paths(product)
+        requested = cls._normalize_product_folder_path(requested_folder)
+        selected = ""
+        if requested:
+            for path in paths:
+                if (
+                    path.casefold() == requested.casefold()
+                    or (
+                        "/" not in requested
+                        and path.casefold().endswith("/" + requested.casefold())
+                    )
+                ):
+                    selected = path
+                    break
+        if not selected and paths:
+            selected = paths[0]
+        if not selected:
+            selected = requested
+        product["folder_path"] = selected
+        product["folder_paths"] = paths
+        return product
+
+    def load_product_index(self, force: bool = False) -> dict:
+        """Load every Product with its actual ProductFolder path once.
+
+        ``complete`` is false when an SDK subtree could not be read.  Callers
+        may still reuse a positive identity/name hit from a partial index, but
+        they must not treat a partial miss as proof that a Product is absent.
+        """
+        if self._product_index is not None and not force:
+            return {
+                "products": [dict(item) for item in self._product_index],
+                "complete": self._product_index_complete,
+                "products_complete": self._product_index_complete,
+                "parts_complete": self._root_part_index_complete,
+                "errors": [dict(item) for item in self._product_index_errors],
+            }
+
+        result = self.bridge.call(
+            {"cmd": "list_products", "include_root_parts": False},
+            timeout=240.0,
+        )
+        raw_products = result.get("products")
+        if not isinstance(raw_products, list):
+            raise CaxaError(
+                "CAXA 未返回完整的产品索引",
+                stage="product_index_read",
+            )
+
+        products = []
+        seen = set()
+        for raw in raw_products:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                object_id = int(raw["object_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if object_id in seen:
+                continue
+            seen.add(object_id)
+            item = {
+                "object_id": object_id,
+                "class_id": raw.get("class_id"),
+                "identity": str(raw.get("identity") or "").strip().upper(),
+                "name": str(raw.get("name") or "").strip(),
+                "folder_path": self._normalize_product_folder_path(
+                    raw.get("folder_path")
+                ),
+                "folder_paths": self._product_folder_paths(raw),
+                "found_in_product_index": True,
+                "root_parts": list(
+                    self._product_root_parts.get(object_id, [])
+                ),
+            }
+            for part in raw.get("root_parts") or []:
+                if not isinstance(part, dict):
+                    continue
+                try:
+                    part_id = int(part["object_id"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                item["root_parts"].append(
+                    {
+                        "object_id": part_id,
+                        "identity": str(part.get("identity") or "").strip().upper(),
+                        "name": str(part.get("name") or "").strip(),
+                        "reference": bool(part.get("reference")),
+                    }
+                )
+            products.append(item)
+
+        errors = result.get("errors")
+        if not isinstance(errors, list):
+            errors = []
+        self._product_index = products
+        fallback_complete = result.get("complete") is True and not errors
+        self._product_index_complete = bool(
+            result.get("products_complete", fallback_complete)
+        )
+        root_parts_included = bool(result.get("root_parts_included"))
+        self._root_part_index_complete = bool(
+            root_parts_included
+            and result.get("parts_complete", fallback_complete)
+            and all(
+                int(item["object_id"]) in self._product_root_parts
+                for item in products
+            )
+        )
+        self._product_index_errors = [
+            dict(item) for item in errors if isinstance(item, dict)
+        ]
+        self.log(
+            "已读取 CAXA 产品索引：%d 个产品，%d 个产品总装件%s"
+            % (
+                len(products),
+                sum(len(item.get("root_parts") or []) for item in products),
+                "" if self._product_index_complete else
+                "（部分目录读取失败，不能据此判定产品不存在）",
+            )
+        )
+        return {
+            "products": [dict(item) for item in products],
+            "complete": self._product_index_complete,
+            "products_complete": self._product_index_complete,
+            "parts_complete": self._root_part_index_complete,
+            "errors": [dict(item) for item in self._product_index_errors],
+        }
+
+    def load_product_root_parts(self, product_ids) -> dict:
+        """Load root machine Parts only for selected Products."""
+        ids = list(
+            dict.fromkeys(
+                int(value)
+                for value in product_ids or ()
+                if value is not None
+            )
+        )
+        missing = [
+            product_id for product_id in ids
+            if product_id not in self._product_root_parts
+        ]
+        errors = []
+        for start in range(0, len(missing), 200):
+            batch = missing[start:start + 200]
+            result = self.bridge.call(
+                {"cmd": "product_root_parts", "product_ids": batch},
+                timeout=240.0,
+            )
+            items = result.get("items")
+            if not isinstance(items, list):
+                raise CaxaError(
+                    "CAXA 未返回所选产品的总装件索引",
+                    stage="product_root_part_read",
+                )
+            returned = set()
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    product_id = int(item["product_id"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                returned.add(product_id)
+                roots = []
+                for part in item.get("root_parts") or []:
+                    if not isinstance(part, dict):
+                        continue
+                    try:
+                        part_id = int(part["object_id"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    roots.append(
+                        {
+                            "object_id": part_id,
+                            "identity": str(
+                                part.get("identity") or ""
+                            ).strip().upper(),
+                            "name": str(part.get("name") or "").strip(),
+                            "reference": bool(part.get("reference")),
+                        }
+                    )
+                if item.get("root_parts_error"):
+                    errors.append(dict(item))
+                else:
+                    self._product_root_parts[product_id] = roots
+            for product_id in batch:
+                if product_id not in returned:
+                    errors.append(
+                        {
+                            "product_id": product_id,
+                            "root_parts_error": "产品总装件未返回",
+                        }
+                    )
+        if self._product_index is not None:
+            for item in self._product_index:
+                roots = self._product_root_parts.get(item["object_id"])
+                if roots is not None:
+                    item["root_parts"] = list(roots)
+            self._root_part_index_complete = bool(
+                all(
+                    int(item["object_id"]) in self._product_root_parts
+                    for item in self._product_index
+                )
+            )
+        return {
+            "loaded": sum(
+                product_id in self._product_root_parts
+                for product_id in ids
+            ),
+            "requested": len(ids),
+            "errors": errors,
+            "complete": self._root_part_index_complete,
+        }
+
+    def _enrich_product_from_index(
+        self,
+        product: dict,
+        requested_folder: str = "",
+    ) -> dict:
+        if self._product_index is None:
+            return self._product_with_folder(product, requested_folder)
+        object_id = product.get("object_id")
+        match = None
+        for item in self._product_index:
+            if object_id is not None and item["object_id"] == int(object_id):
+                match = item
+                break
+        if match is None:
+            identity = str(product.get("identity") or "").strip().upper()
+            matches = [
+                item for item in self._product_index
+                if identity and item["identity"] == identity
+            ]
+            if len(matches) == 1:
+                match = matches[0]
+        if match is not None:
+            product = dict(product)
+            product.update(
+                folder_path=match.get("folder_path") or "",
+                folder_paths=list(match.get("folder_paths") or []),
+            )
+        return self._product_with_folder(product, requested_folder)
+
     def find_product(self, identity: str):
         identity = str(identity or "").strip().upper()
         if not identity:
             return None
         cached = self._product_cache.get(identity)
         if cached is not None:
-            return dict(cached)
+            return self._enrich_product_from_index(cached)
 
         # Product identity is an indexed object-store property.  Query it
         # first: recursively scanning every Product/ProductFolder can take tens
@@ -195,6 +470,7 @@ class CaxaUploader:
                 "name": low_items[0].get("name") or "",
                 "found_by_identity": True,
             }
+            product = self._enrich_product_from_index(product)
             self._product_cache[identity] = dict(product)
             return product
         if len(low_items) > 1:
@@ -216,14 +492,17 @@ class CaxaUploader:
         found = r.get("found", [])
         for p in found:
             if (p.get("identity") or "").upper() == identity:
+                p = self._enrich_product_from_index(p)
                 self._product_cache[identity] = dict(p)
                 return p
         for p in found:
             if (p.get("name") or "").strip().upper() == identity:
+                p = self._enrich_product_from_index(p)
                 self._product_cache[identity] = dict(p)
                 return p
         for p in found:
             if identity in (p.get("name") or "").upper():
+                p = self._enrich_product_from_index(p)
                 self._product_cache[identity] = dict(p)
                 return p
         self.log("未找到整机产品 %s，候选：%s" % (
@@ -265,6 +544,14 @@ class CaxaUploader:
                 "identity": identity,
                 "name": found[0].get("name") or "",
                 "found_in_folder": True,
+                "folder_path": self._normalize_product_folder_path(
+                    found[0].get("folder_path") or folder_path
+                ),
+                "folder_paths": [
+                    self._normalize_product_folder_path(
+                        found[0].get("folder_path") or folder_path
+                    )
+                ],
             }
             self._product_cache[identity] = dict(product)
             return product
@@ -280,24 +567,37 @@ class CaxaUploader:
         if not name:
             return []
         result = self.bridge.call(
-            {"cmd": "find_product", "keyword": name, "limit": 100}
+            {"cmd": "query_product", "keyword": name}
         )
         products = []
         seen = set()
-        for item in result.get("found") or []:
+        for item in result.get("items") or []:
             if str(item.get("name") or "").strip().casefold() != name.casefold():
                 continue
-            object_id = item.get("object_id")
-            if object_id is None or int(object_id) in seen:
+            try:
+                product_id = int(item["object_id"])
+            except (KeyError, TypeError, ValueError):
                 continue
-            seen.add(int(object_id))
-            products.append(
-                {
-                    "object_id": int(object_id),
-                    "identity": str(item.get("identity") or ""),
-                    "name": str(item.get("name") or ""),
-                }
+            if product_id in seen:
+                continue
+            seen.add(product_id)
+            product = {
+                "object_id": product_id,
+                "identity": str(item.get("identity") or "").strip().upper(),
+                "name": str(item.get("name") or "").strip(),
+                "found_by_name_query": True,
+            }
+            try:
+                folders = self.product_folder_paths(product_id)
+            except CaxaError:
+                folders = {"paths": [], "complete": False}
+            product["folder_paths"] = list(folders.get("paths") or [])
+            product["folder_path"] = (
+                product["folder_paths"][0]
+                if product["folder_paths"]
+                else ""
             )
+            products.append(product)
         return products
 
     def _product_in_folder(self, product: dict, folder_id) -> bool:
@@ -322,6 +622,145 @@ class CaxaUploader:
                 continue
         return False
 
+    def _root_part_matches(
+        self,
+        machine: str,
+        folder_name: str,
+        product_ids=None,
+    ) -> list[dict]:
+        allowed = None if product_ids is None else {
+            int(value) for value in product_ids
+        }
+        matches = []
+        for item in self._product_index or []:
+            if allowed is not None and item["object_id"] not in allowed:
+                continue
+            for part in item.get("root_parts") or []:
+                if part.get("identity") != machine:
+                    continue
+                product = self._product_with_folder(item, folder_name)
+                product["found_by_root_part"] = True
+                product["matched_product_part"] = dict(part)
+                matches.append(product)
+                break
+        return matches
+
+    def _candidate_product_ids(
+        self,
+        machine: str,
+        product_name: str,
+        folder_name: str,
+    ) -> list[int]:
+        machine_stem = (
+            machine.rsplit("-", 1)[0] if "-" in machine else machine
+        )
+        candidates = []
+        for item in self._product_index or []:
+            identity = str(item.get("identity") or "")
+            identity_stem = (
+                identity.rsplit("-", 1)[0] if "-" in identity else identity
+            )
+            if (
+                (identity and machine_stem.startswith(identity))
+                or (identity and identity.startswith(machine_stem))
+                or (
+                    identity_stem
+                    and machine.startswith(identity_stem)
+                )
+                or (
+                    product_name
+                    and str(item.get("name") or "").strip().casefold()
+                    == product_name.casefold()
+                )
+                or (
+                    folder_name
+                    and any(
+                        path.casefold() == folder_name.casefold()
+                        or (
+                            "/" not in folder_name
+                            and path.casefold().endswith(
+                                "/" + folder_name.casefold()
+                            )
+                        )
+                        for path in item.get("folder_paths") or []
+                    )
+                )
+            ):
+                candidates.append(int(item["object_id"]))
+        return list(dict.fromkeys(candidates))
+
+    def product_folder_paths(self, product_id: int) -> dict:
+        """Read actual ProductFolder paths for one Product."""
+        product_id = int(product_id)
+        cached = self._product_folder_paths_cache.get(product_id)
+        if cached is not None:
+            return dict(cached)
+        result = self.bridge.call(
+            {"cmd": "product_folder_paths", "product_id": product_id}
+        )
+        paths = []
+        for value in result.get("paths") or []:
+            path = self._normalize_product_folder_path(value)
+            if path and path.casefold() not in {
+                existing.casefold() for existing in paths
+            }:
+                paths.append(path)
+        normalized = {
+            "product_id": product_id,
+            "paths": paths,
+            "complete": result.get("complete") is True,
+            "errors": list(result.get("errors") or []),
+        }
+        self._product_folder_paths_cache[product_id] = normalized
+        return dict(normalized)
+
+    def products_by_machine_part(self, machine: str) -> list[dict]:
+        """Use CAXA's ProductPartLink advanced query for an existing Part."""
+        machine = str(machine or "").strip().upper()
+        if not machine:
+            return []
+        result = self.bridge.call(
+            {
+                "cmd": "find_product_by_part",
+                "identity": machine,
+                "limit": 20,
+            }
+        )
+        products = []
+        seen = set()
+        for item in result.get("items") or []:
+            if str(item.get("class_name") or "").casefold() != "product":
+                continue
+            try:
+                product_id = int(item["object_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if product_id in seen:
+                continue
+            seen.add(product_id)
+            product = {
+                "object_id": product_id,
+                "identity": str(item.get("IdentityNo") or "").strip().upper(),
+                "name": str(item.get("name") or "").strip(),
+                "description": str(item.get("description") or "").strip(),
+                "found_by_part_query": True,
+            }
+            try:
+                folders = self.product_folder_paths(product_id)
+            except CaxaError:
+                folders = {"paths": [], "complete": False, "errors": []}
+            product["folder_paths"] = list(folders.get("paths") or [])
+            product["folder_path"] = (
+                product["folder_paths"][0]
+                if product["folder_paths"]
+                else ""
+            )
+            product["folder_paths_complete"] = bool(
+                folders.get("complete")
+            )
+            products.append(product)
+        return products
+
     def find_product_for_machine(
         self,
         machine: str,
@@ -336,34 +775,209 @@ class CaxaUploader:
         the expected ProductFolder.  Ambiguous exact-name matches are blocked.
         """
         machine = str(machine or "").strip().upper()
+
+        # CAXA's own object-store query is indexed and is much cheaper than
+        # walking Product/ProductFolder relations.  The machine code identifies
+        # the real root Part, so use that as the first existence check.
+        part_candidates = self.find_part_candidates(machine)
+        if len(part_candidates) > 1:
+            raise CaxaError(
+                "整机图号 %s 对应 %d 个 Part，请先人工清理重复零件"
+                % (machine, len(part_candidates)),
+                stage="machine_part_duplicate",
+            )
+        if len(part_candidates) == 1:
+            part = dict(part_candidates[0])
+            self._part_cache[machine] = dict(part)
+            self.log(
+                "已按 CAXA 零部件索引确认整机零件：%s"
+                % machine
+            )
+
+        if len(part_candidates) == 1:
+            try:
+                part_products = self.products_by_machine_part(machine)
+            except CaxaError as exc:
+                self.log(
+                    "高级 Product 反查暂不可用，改用产品目录兜底：%s"
+                    % exc
+                )
+            else:
+                if len(part_products) > 1:
+                    raise CaxaError(
+                        "整机零件 %s 同时关联 %d 个 Product，"
+                        "无法唯一确定所属产品"
+                        % (machine, len(part_products)),
+                        stage="product_root_part_duplicate",
+                    )
+                if len(part_products) == 1:
+                    product = self._product_with_folder(
+                        part_products[0], product_folder
+                    )
+                    product["found_machine_part"] = dict(
+                        part_candidates[0]
+                    )
+                    self._product_cache[machine] = dict(product)
+                    self.log(
+                        "已用 CAXA 高级查询匹配整机：%s → %s → %s"
+                        % (
+                            machine,
+                            product.get("folder_path") or "根目录",
+                            product.get("identity")
+                            or product.get("name")
+                            or "未命名产品",
+                        )
+                    )
+                    return product
+
         product = self.find_product(machine)
-        if product is None:
-            product = self.find_product_in_folder(machine, product_folder)
         if product is not None:
+            product = self._enrich_product_from_index(product, product_folder)
+            if self.bridge is not None and not product.get("folder_paths"):
+                try:
+                    folders = self.product_folder_paths(
+                        int(product["object_id"])
+                    )
+                except CaxaError:
+                    folders = {}
+                product["folder_paths"] = list(
+                    folders.get("paths") or []
+                )
+                if product["folder_paths"]:
+                    product["folder_path"] = product["folder_paths"][0]
+                    product = self._product_with_folder(
+                        product, product_folder
+                    )
+            if len(part_candidates) == 1:
+                product["found_machine_part"] = dict(part_candidates[0])
             return product
 
         name = str(product_name or "").strip()
-        if not name:
-            self.log("未找到整机产品 %s" % machine)
-            return None
-        candidates = self.find_products_by_name(name)
-        if not candidates:
-            return None
-
-        folder_name = str(product_folder or "").strip()
-        if folder_name:
-            folder = self.find_product_folder(folder_name)
-            folder_id = (folder or {}).get("object_id")
-            if folder_id is not None:
-                in_folder = [
-                    candidate for candidate in candidates
-                    if self._product_in_folder(candidate, folder_id)
+        folder_name = self._normalize_product_folder_path(product_folder)
+        if name:
+            fast_products = self.find_products_by_name(name)
+            if folder_name:
+                fast_products = [
+                    product for product in fast_products
+                    if any(
+                        path.casefold() == folder_name.casefold()
+                        or (
+                            "/" not in folder_name
+                            and path.casefold().endswith(
+                                "/" + folder_name.casefold()
+                            )
+                        )
+                        for path in product.get("folder_paths") or []
+                    )
                 ]
-                if len(in_folder) == 1:
-                    product = in_folder[0]
-                    self._product_cache[machine] = dict(product)
-                    self._product_cache[name.upper()] = dict(product)
-                    return product
+            if len(fast_products) > 1:
+                raise CaxaError(
+                    "产品名称 %s 在目录 %s 中对应 %d 个 Product；"
+                    "请先人工清理重复对象"
+                    % (name, folder_name or "未指定", len(fast_products)),
+                    stage="product_series_duplicate",
+                )
+            if len(fast_products) == 1:
+                product = self._product_with_folder(
+                    fast_products[0], folder_name
+                )
+                self._product_cache[machine] = dict(product)
+                self._product_cache[name.upper()] = dict(product)
+                self.log(
+                    "已按产品名称快速匹配整机：%s → %s → %s"
+                    % (
+                        machine,
+                        product.get("folder_path") or "根目录",
+                        name,
+                    )
+                )
+                return product
+
+        index = self.load_product_index()
+        identity_matches = [
+            item for item in index.get("products") or []
+            if item.get("identity") == machine
+        ]
+        if len(identity_matches) > 1:
+            raise CaxaError(
+                "图号 %s 在产品索引中对应 %d 个产品，请先人工清理重复产品"
+                % (machine, len(identity_matches)),
+                stage="product_identity_duplicate",
+            )
+        if len(identity_matches) == 1:
+            product = self._product_with_folder(
+                identity_matches[0], folder_name
+            )
+            if len(part_candidates) == 1:
+                product["found_machine_part"] = dict(part_candidates[0])
+            self._product_cache[machine] = dict(product)
+            self.log(
+                "已从产品索引匹配整机 %s → %s"
+                % (machine, product.get("folder_path") or "根目录")
+            )
+            return product
+
+        candidate_ids = self._candidate_product_ids(
+            machine, name, folder_name
+        )
+        if candidate_ids:
+            self.load_product_root_parts(candidate_ids)
+        root_part_matches = self._root_part_matches(
+            machine, folder_name, candidate_ids
+        )
+        if len(root_part_matches) > 1:
+            own_matches = [
+                item for item in root_part_matches
+                if not (item.get("matched_product_part") or {}).get("reference")
+            ]
+            if len(own_matches) == 1:
+                root_part_matches = own_matches
+        if len(root_part_matches) > 1:
+            raise CaxaError(
+                "整机零件 %s 同时挂在 %d 个产品下，无法唯一确定所属产品；"
+                "请先人工清理重复总装关系"
+                % (machine, len(root_part_matches)),
+                stage="product_root_part_duplicate",
+            )
+        if len(root_part_matches) == 1:
+            product = root_part_matches[0]
+            if len(part_candidates) == 1:
+                product["found_machine_part"] = dict(part_candidates[0])
+            self._product_cache[machine] = dict(product)
+            self.log(
+                "已按整机零件匹配所属产品：%s → %s → %s"
+                % (
+                    machine,
+                    product.get("folder_path") or "根目录",
+                    product.get("identity") or product.get("name") or "未命名产品",
+                )
+            )
+            return product
+
+        if name:
+            candidates = [
+                item for item in index.get("products") or []
+                if str(item.get("name") or "").strip().casefold()
+                == name.casefold()
+            ]
+            if folder_name:
+                in_folder = []
+                for candidate in candidates:
+                    product = self._product_with_folder(
+                        candidate, folder_name
+                    )
+                    paths = product.get("folder_paths") or []
+                    if any(
+                        path.casefold() == folder_name.casefold()
+                        or (
+                            "/" not in folder_name
+                            and path.casefold().endswith(
+                                "/" + folder_name.casefold()
+                            )
+                        )
+                        for path in paths
+                    ):
+                        in_folder.append(product)
                 if len(in_folder) > 1:
                     raise CaxaError(
                         "系列目录 %s 有 %d 个产品使用名称 %s；"
@@ -371,18 +985,96 @@ class CaxaUploader:
                         % (folder_name, len(in_folder), name),
                         stage="product_series_duplicate",
                     )
+                if len(in_folder) == 1:
+                    product = in_folder[0]
+                    if len(part_candidates) == 1:
+                        product["found_machine_part"] = dict(part_candidates[0])
+                    self._product_cache[machine] = dict(product)
+                    self._product_cache[name.upper()] = dict(product)
+                    return product
+            if len(candidates) == 1:
+                product = self._product_with_folder(
+                    candidates[0], folder_name
+                )
+                if len(part_candidates) == 1:
+                    product["found_machine_part"] = dict(part_candidates[0])
+                self._product_cache[machine] = dict(product)
+                self._product_cache[name.upper()] = dict(product)
+                return product
+            if len(candidates) > 1:
+                raise CaxaError(
+                    "有 %d 个产品使用名称 %s，无法从系列目录 %s 唯一确定；"
+                    "请先人工清理重复对象"
+                    % (len(candidates), name, folder_name or "未指定"),
+                    stage="product_series_duplicate",
+                )
 
-        if len(candidates) == 1:
-            product = candidates[0]
-            self._product_cache[machine] = dict(product)
-            self._product_cache[name.upper()] = dict(product)
-            return product
-        raise CaxaError(
-            "有 %d 个产品使用名称 %s，无法从系列目录 %s 唯一确定；"
-            "请先人工清理重复对象"
-            % (len(candidates), name, folder_name or "未指定"),
-            stage="product_series_duplicate",
-        )
+        if folder_name:
+            product = self.find_product_in_folder(machine, folder_name)
+            if product is not None:
+                if len(part_candidates) == 1:
+                    product["found_machine_part"] = dict(part_candidates[0])
+                return product
+
+        if not self._root_part_index_complete:
+            self.load_product_root_parts(
+                item["object_id"] for item in index.get("products") or []
+            )
+            root_part_matches = self._root_part_matches(
+                machine, folder_name
+            )
+            if len(root_part_matches) > 1:
+                own_matches = [
+                    item for item in root_part_matches
+                    if not (
+                        item.get("matched_product_part") or {}
+                    ).get("reference")
+                ]
+                if len(own_matches) == 1:
+                    root_part_matches = own_matches
+            if len(root_part_matches) > 1:
+                raise CaxaError(
+                    "整机零件 %s 同时挂在 %d 个产品下，无法唯一确定所属产品；"
+                    "请先人工清理重复总装关系"
+                    % (machine, len(root_part_matches)),
+                    stage="product_root_part_duplicate",
+                )
+            if len(root_part_matches) == 1:
+                product = root_part_matches[0]
+                if len(part_candidates) == 1:
+                    product["found_machine_part"] = dict(part_candidates[0])
+                self._product_cache[machine] = dict(product)
+                self.log(
+                    "已按整机零件匹配所属产品：%s → %s → %s"
+                    % (
+                        machine,
+                        product.get("folder_path") or "根目录",
+                        product.get("identity")
+                        or product.get("name")
+                        or "未命名产品",
+                    )
+                )
+                return product
+
+        if not (
+            self._product_index_complete
+            and self._root_part_index_complete
+        ):
+            raise CaxaError(
+                "CAXA 产品/总装件索引读取不完整，无法确认整机 %s 是否已存在；"
+                "请恢复目录权限后重新预检" % machine,
+                stage="product_index_read",
+                detail="; ".join(
+                    "%s: %s"
+                    % (
+                        item.get("folder_path") or "未知目录",
+                        item.get("detail") or item.get("area") or "",
+                    )
+                    for item in self._product_index_errors
+                ),
+            )
+        self.log("未找到整机产品 %s" % machine)
+        return None
 
     def find_product_folder(self, name: str):
         name = str(name or "").strip()
@@ -422,7 +1114,7 @@ class CaxaUploader:
 
     def find_part_candidates(self, identity: str) -> list[dict]:
         identity = str(identity or "").strip().upper()
-        if not identity:
+        if not identity or self.bridge is None:
             return []
         r = self.bridge.call({"cmd": "query_parts", "keyword": identity})
         return [
@@ -443,6 +1135,27 @@ class CaxaUploader:
             self._part_cache[identity] = dict(candidates[0])
             return candidates[0]
         return None
+
+    def existing_machine_part(self, machine: str):
+        """Return one existing 03 machine Part without resolving its Product."""
+        machine = str(machine or "").strip().upper()
+        if not machine:
+            return None
+        cached = self._part_cache.get(machine)
+        if cached is not None:
+            return dict(cached)
+        candidates = self.find_part_candidates(machine)
+        if len(candidates) > 1:
+            raise CaxaError(
+                "整机图号 %s 对应 %d 个 Part，请先人工清理重复零件"
+                % (machine, len(candidates)),
+                stage="machine_part_duplicate",
+            )
+        if not candidates:
+            return None
+        part = dict(candidates[0])
+        self._part_cache[machine] = dict(part)
+        return part
 
     def part_drawings(self, part_id: int, strict: bool = False,
                       refresh: bool = False):
@@ -1004,7 +1717,6 @@ class CaxaUploader:
         create_part: bool = True,
         product_name: str = "",
         product_folder: str = "",
-        ensure_existing_product_folder: bool = True,
     ):
         """Ensure the whole-machine Product and Part.
 
@@ -1017,15 +1729,26 @@ class CaxaUploader:
             str(product_folder or "").strip()
             or relations.series_product_folder(machine)
         )
+        existing_part = self.existing_machine_part(machine)
+        if existing_part is not None:
+            existing_part["created_new_part"] = False
+            existing_part["link_failed"] = False
+            self.log(
+                "复用已有整机零件：%s（不解析或移动 Product）"
+                % machine
+            )
+            return {}, existing_part
+
+        product_name = str(product_name or "").strip()
+        if not product_name:
+            raise MachineMissing(machine)
+
         product = self.find_product_for_machine(
             machine,
             product_name=product_name,
             product_folder=product_folder,
         )
         if product is None:
-            product_name = str(product_name or "").strip()
-            if not product_name:
-                raise MachineMissing(machine)
             folder_result = {}
             if product_folder:
                 folder_result = self.require_product_folder_path(product_folder)
@@ -1036,12 +1759,13 @@ class CaxaUploader:
                 "已创建系列产品：%s（产品代号 %s，目录 %s）"
                 % (product_name, machine, product_folder or "根目录")
             )
-        elif product_folder and ensure_existing_product_folder:
-            folder_result = self.ensure_product_folder(product, product_folder)
-            if not folder_result.get("already_linked"):
+        else:
+            product = self._enrich_product_from_index(product, product_folder)
+            actual_folder = str(product.get("folder_path") or "").strip()
+            if actual_folder:
                 self.log(
-                    "已补挂系列产品目录：%s → %s"
-                    % (machine, folder_result.get("product_folder") or product_folder)
+                    "复用已有整机产品：%s → %s（保持原目录）"
+                    % (machine, actual_folder)
                 )
         part = self.machine_part(product["object_id"], machine)
         if part is None:
@@ -1066,6 +1790,7 @@ class CaxaUploader:
         self._machine_part_cache[
             (int(product["object_id"]), str(machine).strip().upper())
         ] = dict(part)
+        self._part_cache[str(machine).strip().upper()] = dict(part)
         return product, part
 
     def resolve_parent_part(self, code: str, batch_codes: set, explicit_parent: str = ""):
@@ -1141,9 +1866,6 @@ class CaxaUploader:
                     create_part=may_create,
                     product_name=series_product_name,
                     product_folder=series_product_folder,
-                    ensure_existing_product_folder=not (
-                        kind == "component" and relation_type == "borrow"
-                    ),
                 )
             except MachineMissing:
                 if kind in ("process_doc", "machine_drawing"):
@@ -1201,8 +1923,14 @@ class CaxaUploader:
             result = self.attach_file(
                 part_id, staged.path, drawing_type, file_name, draw_no=code, kind=kind
             )
-            caxa_path = "产品 %s（%s）→ 整机零件 %s → 文档 %s" % (
-                machine, (product or {}).get("name", ""), machine, file_name)
+            product_folder = str((product or {}).get("folder_path") or "")
+            caxa_path = "%s产品 %s（%s）→ 整机零件 %s → 文档 %s" % (
+                ("目录 %s → " % product_folder) if product_folder else "",
+                machine,
+                (product or {}).get("name", ""),
+                machine,
+                file_name,
+            )
             return {
                 "target": "整机 %s 工艺文档" % machine,
                 "file_name": file_name,
@@ -1234,8 +1962,14 @@ class CaxaUploader:
             result = self.attach_file(
                 part_id, staged.path, drawing_type, file_name, draw_no=code, kind=kind
             )
-            caxa_path = "产品 %s（%s）→ 整机零件 %s → 文档 %s" % (
-                machine, (product or {}).get("name", ""), machine, file_name)
+            product_folder = str((product or {}).get("folder_path") or "")
+            caxa_path = "%s产品 %s（%s）→ 整机零件 %s → 文档 %s" % (
+                ("目录 %s → " % product_folder) if product_folder else "",
+                machine,
+                (product or {}).get("name", ""),
+                machine,
+                file_name,
+            )
             return {
                 "target": "整机 %s 图纸" % machine,
                 "file_name": file_name,
@@ -1362,9 +2096,6 @@ class CaxaUploader:
                         or (self._general_product or {}).get("object_id"),
                     },
                 ) from ex
-        else:
-            parent_id = parent_id or part.get("parent_id")
-
         if code.startswith("02."):
             self.ensure_product_owner(part, code)
         self.ensure_part_material_code(part["object_id"], code)

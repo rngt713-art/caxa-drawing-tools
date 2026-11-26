@@ -303,6 +303,10 @@ class PrecheckItemMergeTests(unittest.TestCase):
                         "existing_original": True,
                         "existing_original_part_id": 501,
                         "upgrade_only": True,
+                        "series_product_name": "HX21 2.0",
+                        "series_product_folder": "HX系列",
+                        "series_product_folder_requested": "HX21系列",
+                        "series_product_exists": True,
                         "status": "不应复制",
                     }
                 ]
@@ -312,6 +316,12 @@ class PrecheckItemMergeTests(unittest.TestCase):
         self.assertTrue(items[0]["existing_original"])
         self.assertEqual(items[0]["existing_original_part_id"], 501)
         self.assertTrue(items[0]["upgrade_only"])
+        self.assertEqual(items[0]["series_product_name"], "HX21 2.0")
+        self.assertEqual(items[0]["series_product_folder"], "HX系列")
+        self.assertEqual(
+            items[0]["series_product_folder_requested"], "HX21系列"
+        )
+        self.assertTrue(items[0]["series_product_exists"])
         self.assertNotIn("status", items[0])
 
 

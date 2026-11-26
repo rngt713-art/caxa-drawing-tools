@@ -233,6 +233,10 @@ class TreeDecisionTests(unittest.TestCase):
             "HT合同特殊",
         )
         self.assertEqual(
+            relations.series_product_folder("03.HT.HG025-350W"),
+            "HT合同特殊",
+        )
+        self.assertEqual(
             relations.series_product_folder("03.HW.015350-46P01"),
             "HW系列",
         )

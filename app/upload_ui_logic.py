@@ -238,6 +238,13 @@ def apply_precheck_items(items: list[dict], result_manifest: dict) -> int:
             "upgrade_only",
             "upgrade_only_user_set",
             "upgrade_only_defaulted",
+            "series_product_name",
+            "series_product_folder",
+            "series_product_folder_requested",
+            "series_product_exists",
+            "series_product_part_exists",
+            "series_product_folder_exists",
+            "series_product_folder_will_create",
         ):
             if key in source:
                 item[key] = source[key]

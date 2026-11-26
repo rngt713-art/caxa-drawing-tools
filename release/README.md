@@ -1,10 +1,22 @@
-# CAXA 图纸上传助手 v1.2.3
+# CAXA 图纸上传助手 v1.2.5
 
 本 Release 只提供编译后的上传端 EXE 和本说明。源码请从 GitHub 仓库 clone：
 
 ```text
 https://github.com/rngt713-art/caxa-drawing-tools.git
 ```
+
+## v1.2.5 更新
+
+- 03 整机改为 Part 优先：先用 CAXA 零部件索引精确查询整机 Part。
+- 整机 Part 已存在时直接复用，不再解析 Product，也不要求产品名称或目录。
+- 整机 Part 不存在时，产品名称变为人工必填；按输入名称快速查询已有 Product，
+  命中且目录唯一时复用，未命中才新建 Product。
+- 新增 CAXA 高级 `ProductPartLink` 查询，可按整机 Part 返回实际 Product 和目录。
+- 产品名称查询不再加载整个 Product 目录索引。
+- `03.HT.HG025-350W` 等普通 HT 整机固定映射到 `HT合同特殊`；不会误映射到
+  `HT系列`。
+- 每批已有整机只做 `query_parts`，不会再为每台整机遍历设计树或 ProductFolder。
 
 ## 运行环境
 
@@ -74,7 +86,7 @@ https://github.com/rngt713-art/caxa-drawing-tools.git
 
 ## 版本
 
-- 当前版本：`v1.2.3`
+- 当前版本：`v1.2.5`
 - 正式版本以 Git tag `vX.Y.Z` 和界面标题为准；安装文件名固定为
   `图纸上传助手.exe`。
 - `SHA256SUMS.txt` 记录当前上传端和 helper 的 SHA-256。

@@ -63,6 +63,8 @@ class CaxaHelper
 
     static JavaScriptSerializer _json = new JavaScriptSerializer();
     static EAPService _svc;
+    static Dictionary<int, List<string>> _productFolderPathIndex;
+    static List<object> _productFolderPathErrors;
 
     static Dictionary<string, object> Ok(object extra = null)
     {
@@ -715,29 +717,278 @@ class CaxaHelper
         return Ok(new Dictionary<string, object> { { "found", found } });
     }
 
-    static Dictionary<string, object> CmdListProducts()
+    static Dictionary<string, object> CmdListProducts(Dictionary<string, object> a)
     {
         if (_svc == null || !_svc.HasLogin) return Err("not logged in");
+        bool includeRootParts = a.ContainsKey("include_root_parts") &&
+            Convert.ToBoolean(a["include_root_parts"]);
         var list = new List<object>();
-        var seen = new HashSet<int>();
-        Action<IEAPProductEntity> addProduct = p =>
+        var indexes = new Dictionary<int, int>();
+        var productErrors = new List<object>();
+        var partErrors = new List<object>();
+        Action<IEAPProductEntity, string> addProduct = (p, folderPath) =>
         {
-            if (seen.Add(p.ObjectID))
+            if (p == null) return;
+            string path = NormalizeProductFolderPath(folderPath);
+            int index;
+            if (!indexes.TryGetValue(p.ObjectID, out index))
             {
-                list.Add(new Dictionary<string, object>
+                index = list.Count;
+                indexes[p.ObjectID] = index;
+                var row = new Dictionary<string, object>
                 {
                     { "object_id", p.ObjectID },
                     { "class_id", p.ClassID },
                     { "identity", p.IdentityNo },
-                    { "name", p.Name }
-                });
+                    { "name", p.Name },
+                    { "folder_path", path },
+                    { "folder_paths", new List<object>() }
+                };
+                if (path.Length > 0)
+                {
+                    ((List<object>)row["folder_paths"]).Add(path);
+                }
+                if (includeRootParts)
+                    AddProductRootParts(p, row, partErrors);
+                list.Add(row);
+                return;
+            }
+
+            var existing = (Dictionary<string, object>)list[index];
+            string current = Convert.ToString(existing["folder_path"]);
+            if (current.Length == 0 && path.Length > 0)
+            {
+                existing["folder_path"] = path;
+            }
+            var paths = (List<object>)existing["folder_paths"];
+            if (path.Length > 0 &&
+                !paths.Any(value => string.Equals(
+                    Convert.ToString(value), path,
+                    StringComparison.OrdinalIgnoreCase)))
+            {
+                paths.Add(path);
             }
         };
         foreach (var p in _svc.GetAllRootProducts() ?? new IEAPProductEntity[0])
-            addProduct(p);
+            addProduct(p, "");
         foreach (var pf in _svc.GetAllRootProductFolders() ?? new IEAPProductFolderEntity[0])
-            CollectProducts(pf, addProduct);
-        return Ok(new Dictionary<string, object> { { "products", list } });
+            CollectProductsWithPath(pf, "", addProduct, productErrors);
+        var errors = new List<object>();
+        errors.AddRange(productErrors);
+        errors.AddRange(partErrors);
+        return Ok(new Dictionary<string, object>
+        {
+            { "products", list },
+            { "complete", errors.Count == 0 },
+            { "products_complete", productErrors.Count == 0 },
+            { "parts_complete", !includeRootParts || partErrors.Count == 0 },
+            { "root_parts_included", includeRootParts },
+            { "errors", errors }
+        });
+    }
+
+    static Dictionary<string, object> CmdProductRootParts(Dictionary<string, object> a)
+    {
+        if (_svc == null || !_svc.HasLogin) return Err("not logged in");
+        var ids = new List<int>();
+        if (a.ContainsKey("product_ids") && a["product_ids"] != null)
+        {
+            var values = a["product_ids"] as System.Collections.IEnumerable;
+            if (values != null)
+            {
+                foreach (object value in values)
+                    ids.Add(Convert.ToInt32(value));
+            }
+        }
+        if (a.ContainsKey("product_id"))
+            ids.Add(Convert.ToInt32(a["product_id"]));
+        var items = new List<object>();
+        foreach (int productId in ids.Distinct())
+        {
+            IEAPProductEntity product = _svc.GetProduct(productId);
+            if (product == null)
+            {
+                items.Add(new Dictionary<string, object>
+                {
+                    { "product_id", productId },
+                    { "root_parts", new List<object>() },
+                    { "root_parts_error", "product not found" }
+                });
+                continue;
+            }
+            var errors = new List<object>();
+            var row = new Dictionary<string, object>
+            {
+                { "folder_path", "" },
+                { "root_parts", new List<object>() }
+            };
+            AddProductRootParts(product, row, errors);
+            items.Add(new Dictionary<string, object>
+            {
+                { "product_id", productId },
+                { "root_parts", row["root_parts"] },
+                { "root_parts_error", errors.Count > 0 ? errors[0] : null }
+            });
+        }
+        return Ok(new Dictionary<string, object> { { "items", items } });
+    }
+
+    static Dictionary<string, object> CmdProductFolderPaths(Dictionary<string, object> a)
+    {
+        if (_svc == null || !_svc.HasLogin) return Err("not logged in");
+        int productId = Convert.ToInt32(a["product_id"]);
+        if (_productFolderPathIndex == null)
+        {
+            _productFolderPathIndex = new Dictionary<int, List<string>>();
+            _productFolderPathErrors = new List<object>();
+            foreach (var root in _svc.GetAllRootProductFolders() ??
+                     new IEAPProductFolderEntity[0])
+            {
+                IndexProductFolderPaths(
+                    root, "", _productFolderPathIndex,
+                    _productFolderPathErrors);
+            }
+        }
+        List<string> paths;
+        if (!_productFolderPathIndex.TryGetValue(productId, out paths))
+            paths = new List<string>();
+        return Ok(new Dictionary<string, object>
+        {
+            { "product_id", productId },
+            { "paths", paths.Cast<object>().ToList() },
+            { "complete", _productFolderPathErrors.Count == 0 },
+            { "errors", _productFolderPathErrors }
+        });
+    }
+
+    static void IndexProductFolderPaths(
+        IEAPProductFolderEntity folder,
+        string parentPath,
+        Dictionary<int, List<string>> index,
+        List<object> errors)
+    {
+        if (folder == null) return;
+        string path = NormalizeProductFolderPath(parentPath + "/" + folder.Name);
+        try
+        {
+            foreach (var product in folder.RelatedProducts ??
+                     new IEAPProductEntity[0])
+            {
+                if (product == null) continue;
+                List<string> paths;
+                if (!index.TryGetValue(product.ObjectID, out paths))
+                {
+                    paths = new List<string>();
+                    index[product.ObjectID] = paths;
+                }
+                if (!paths.Any(value => string.Equals(
+                        value, path,
+                        StringComparison.OrdinalIgnoreCase)))
+                {
+                    paths.Add(path);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            errors.Add(new Dictionary<string, object>
+            {
+                { "folder_path", path },
+                { "area", "products" },
+                { "detail", ex.Message }
+            });
+        }
+        try
+        {
+            foreach (var child in folder.Children ??
+                     new IEAPProductFolderEntity[0])
+            {
+                IndexProductFolderPaths(child, path, index, errors);
+            }
+        }
+        catch (Exception ex)
+        {
+            errors.Add(new Dictionary<string, object>
+            {
+                { "folder_path", path },
+                { "area", "children" },
+                { "detail", ex.Message }
+            });
+        }
+    }
+
+    static void AddProductRootParts(
+        IEAPProductEntity product,
+        Dictionary<string, object> row,
+        List<object> errors)
+    {
+        var rootParts = new List<object>();
+        string folderPath = Convert.ToString(row["folder_path"]);
+        try
+        {
+            foreach (var link in product.RelatedRootParts(
+                         (IEAPPrd2PartEntity)null) ??
+                     new IEAPPrd2PartEntity[0])
+            {
+                if (link == null || link.RefPart == null) continue;
+                rootParts.Add(new Dictionary<string, object>
+                {
+                    { "object_id", link.RefPart.ObjectID },
+                    { "identity", link.RefPart.IdentityNo },
+                    { "name", link.RefPart.Name },
+                    { "reference", link.Reference }
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            errors.Add(new Dictionary<string, object>
+            {
+                { "folder_path", folderPath },
+                { "product_id", product.ObjectID },
+                { "area", "root_parts" },
+                { "detail", ex.Message }
+            });
+        }
+        row["root_parts"] = rootParts;
+    }
+
+    static void CollectProductsWithPath(
+        IEAPProductFolderEntity pf,
+        string parentPath,
+        Action<IEAPProductEntity, string> add,
+        List<object> errors)
+    {
+        if (pf == null) return;
+        string path = NormalizeProductFolderPath(parentPath + "/" + pf.Name);
+        try
+        {
+            foreach (var prod in pf.RelatedProducts ?? new IEAPProductEntity[0])
+                add(prod, path);
+        }
+        catch (Exception ex)
+        {
+            errors.Add(new Dictionary<string, object>
+            {
+                { "folder_path", path },
+                { "area", "products" },
+                { "detail", ex.Message }
+            });
+        }
+        try
+        {
+            foreach (var sub in pf.Children ?? new IEAPProductFolderEntity[0])
+                CollectProductsWithPath(sub, path, add, errors);
+        }
+        catch (Exception ex)
+        {
+            errors.Add(new Dictionary<string, object>
+            {
+                { "folder_path", path },
+                { "area", "children" },
+                { "detail", ex.Message }
+            });
+        }
     }
 
     static void CollectProducts(IEAPProductFolderEntity pf, Action<IEAPProductEntity> add)
@@ -1678,11 +1929,14 @@ class CaxaHelper
             var prods = new List<object>();
             foreach (var l in pt.ParentProducts(null) ?? new IEAPPrd2PartEntity[0])
             {
+                int? productId = l.RefProduct != null
+                    ? (int?)l.RefProduct.ObjectID
+                    : null;
                 prods.Add(new Dictionary<string, object>
                 {
                     { "product_identity", l.RefProduct != null ? l.RefProduct.IdentityNo : null },
                     { "product_name", l.RefProduct != null ? l.RefProduct.Name : null },
-                    { "product_id", l.RefProduct != null ? (object)l.RefProduct.ObjectID : null },
+                    { "product_id", productId },
                     { "reference", l.Reference }
                 });
             }
@@ -1905,6 +2159,144 @@ class CaxaHelper
         catch (Exception ex)
         {
             return Err("query error: " + ex.Message);
+        }
+    }
+
+    static Dictionary<string, object> CmdQueryProduct(Dictionary<string, object> a)
+    {
+        if (_svc == null || !_svc.HasLogin) return Err("not logged in");
+        string keyword = Convert.ToString(a["keyword"]).Trim().ToUpperInvariant();
+        var items = new List<object>();
+        foreach (var product in _svc.QueryProduct(keyword) ??
+                 new IEAPProductEntity[0])
+        {
+            if (product == null) continue;
+            items.Add(new Dictionary<string, object>
+            {
+                { "object_id", product.ObjectID },
+                { "identity", product.IdentityNo },
+                { "name", product.Name }
+            });
+        }
+        return Ok(new Dictionary<string, object>
+        {
+            { "keyword", keyword },
+            { "items", items }
+        });
+    }
+
+    static Dictionary<string, object> CmdFindProductByPart(
+        Dictionary<string, object> a)
+    {
+        if (_svc == null || !_svc.HasLogin) return Err("not logged in");
+        string identity = Convert.ToString(a["identity"]).Trim().ToUpperInvariant();
+        int limit = a.ContainsKey("limit") ? Convert.ToInt32(a["limit"]) : 20;
+        if (identity.Length == 0) return Err("identity is required");
+        string step = "init";
+        try
+        {
+            var engine = CAXA.A5.EAP.CommonLibrary.EAPLibEngine.Instance;
+            var session = engine != null ? engine.CurSession : null;
+            if (session == null) return Err("session unavailable");
+            var store = session.ObjectStore;
+            step = "new_query";
+            var query = store.NewQuery();
+            var condition = query.QueryCondition;
+            if (condition == null) return Err("query condition is null");
+            condition.QueriedClassID = 1012;
+
+            step = "start_object";
+            var classifications = store.GetAllObjectsByClassName(
+                "ProductClassification") as System.Collections.IEnumerable;
+            foreach (object rawCandidate in classifications ?? new object[0])
+            {
+                var candidate = rawCandidate as
+                    CAXA.A5.EAP.CommonLibrary.Session.ObjectStore.ICaxObject;
+                if (candidate == null) continue;
+                string candidateName = "";
+                try { candidateName = candidate.GetValueAsString("name"); }
+                catch { }
+                if (!string.Equals(
+                        candidateName, "HT合同特殊",
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+                condition.StartObject = candidate;
+                break;
+            }
+            if (condition.StartObject == null)
+                return Err("start ProductClassification HT合同特殊 not found");
+
+            step = "new_where";
+            var where = store.NewQueryWhere();
+            if (where == null) return Err("query where is null");
+            where.QueryRoleType =
+                CAXA.A5.EAP.CommonLibrary.Session.ObjectStore.EnumQueryRoleTypes.QueryRoleB;
+            where.ClassName = "Part";
+            where.PropertyName = "IdentityNo";
+            where.OperatorType =
+                CAXA.A5.EAP.CommonLibrary.Session.ObjectStore.EnumWhereOperatorTypes.OP_Contain;
+            where.OperatorValue = identity;
+            var rawProperty = where.GetType().GetProperty("RawQueryWhere");
+            var rawWhere = rawProperty != null
+                ? rawProperty.GetValue(where, null) as
+                    Interop.EAPLib.CxDalWhereClause
+                : null;
+            if (rawWhere == null)
+                return Err("query where conversion failed");
+            rawWhere.queried_class_role_name = "ProdWithTopAssembly";
+            rawWhere.class_name = "Part";
+            rawWhere.role_name = "TopAssemblyInProd";
+            rawWhere.property_name = "IdentityNo";
+            step = "add_where";
+            condition.AddWhere(where);
+
+            step = "run_query";
+            bool ok = query.Run();
+            if (!ok) return Err("advanced query returned false");
+            var items = new List<object>();
+            var result = query.QueryResult;
+            if (result != null)
+            {
+                var rawResults = result.GetAllObjectBases() as
+                    System.Collections.IEnumerable;
+                foreach (object rawObject in rawResults ?? new object[0])
+                {
+                    if (items.Count >= limit) break;
+                    var obj = rawObject as
+                        CAXA.A5.EAP.CommonLibrary.Session.ObjectStore.ICaxObjectBase;
+                    if (obj == null) continue;
+                    var row = new Dictionary<string, object>
+                    {
+                        { "object_id", obj.ObjectId },
+                        { "class_id", obj.ClassId },
+                        { "class_name", obj.ClassName }
+                    };
+                    foreach (string propertyName in new[]
+                    {
+                        "IdentityNo", "name", "description"
+                    })
+                    {
+                        try
+                        {
+                            row[propertyName] =
+                                obj.GetValueAsString(propertyName);
+                        }
+                        catch { }
+                    }
+                    items.Add(row);
+                }
+            }
+            return Ok(new Dictionary<string, object>
+            {
+                { "identity", identity },
+                { "items", items }
+            });
+        }
+        catch (Exception ex)
+        {
+            return Err(
+                "advanced product query failed at " + step + ": " +
+                ex.GetType().FullName + ": " + ex.Message);
         }
     }
 
@@ -2243,12 +2635,21 @@ class CaxaHelper
             try
             {
                 var cls = session.MetaInfo.GetClassByID(id);
-                list.Add(new Dictionary<string, object>
+                var row = new Dictionary<string, object>
                 {
                     { "id", id },
                     { "name", cls != null ? cls.ClassName : null },
                     { "ext", cls != null ? cls.ExternalName : null }
-                });
+                };
+                var link = cls as CAXA.A5.EAP.CommonLibrary.MetaInfo.ICaxLinkClass;
+                if (link != null)
+                {
+                    row["role_a_name"] = link.RoleAName;
+                    row["role_a_ext_name"] = link.RoleAExtName;
+                    row["role_b_name"] = link.RoleBName;
+                    row["role_b_ext_name"] = link.RoleBExtName;
+                }
+                list.Add(row);
             }
             catch (Exception ex)
             {
@@ -4022,7 +4423,9 @@ class CaxaHelper
                         case "logout": resp = CmdLogout(); break;
                         case "dump_tree": resp = CmdDumpTree(req); break;
                         case "find": resp = CmdFind(req); break;
-                        case "list_products": resp = CmdListProducts(); break;
+                        case "list_products": resp = CmdListProducts(req); break;
+                        case "product_root_parts":
+                            resp = CmdProductRootParts(req); break;
                         case "dump_product": resp = CmdDumpProduct(req); break;
                         case "dump_product_by_id":
                             resp = CmdDumpProductById(req); break;
@@ -4044,6 +4447,11 @@ class CaxaHelper
                         case "find_part": resp = CmdFindPart(req); break;
                         case "find_part_in_product": resp = CmdFindPartInProduct(req); break;
                         case "query_parts": resp = CmdQueryParts(req); break;
+                        case "query_product": resp = CmdQueryProduct(req); break;
+                        case "find_product_by_part":
+                            resp = CmdFindProductByPart(req); break;
+                        case "product_folder_paths":
+                            resp = CmdProductFolderPaths(req); break;
                         case "query_objects": resp = CmdQueryObjects(req); break;
                         case "query_links": resp = CmdQueryLinks(req); break;
                         case "wf_dal_probe": resp = CmdWorkflowDalProbe(req); break;

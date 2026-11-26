@@ -166,6 +166,24 @@ def find_machine_product(
     return uploader.find_product(machine)
 
 
+def find_existing_machine_part(uploader: CaxaUploader, machine: str):
+    """Return a unique existing 03 machine Part without needing its Product."""
+    resolver = getattr(uploader, "existing_machine_part", None)
+    if callable(resolver):
+        return resolver(machine)
+    finder = getattr(uploader, "find_part_candidates", None)
+    if not callable(finder):
+        return uploader.find_part(machine)
+    candidates = finder(machine)
+    if len(candidates) > 1:
+        raise CaxaError(
+            "整机图号 %s 对应 %d 个 Part，请先人工清理重复零件"
+            % (machine, len(candidates)),
+            stage="machine_part_duplicate",
+        )
+    return dict(candidates[0]) if candidates else None
+
+
 def _upload_order(items: list[dict], relations: list[dict] | None = None) -> list[dict]:
     """Place a PDF that is a parent of another in-batch PDF first."""
     remaining = list(items)
@@ -1128,17 +1146,39 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                 if target["family"] == "02":
                     continue
 
-                folder_name = (
+                requested_folder = (
                     str(target.get("series_product_folder") or "").strip()
                     or drawing_bundle.series_product_folder(machine_code)
                 )
-                product = find_machine_product(
-                    uploader,
-                    machine_code,
-                    product_name=str(
-                        target.get("series_product_name") or ""
-                    ).strip(),
-                    product_folder=folder_name,
+                existing_part = find_existing_machine_part(
+                    uploader, machine_code
+                )
+                if existing_part is not None:
+                    for item in target["members"]:
+                        item["series_product_folder"] = requested_folder
+                        item["series_product_folder_requested"] = requested_folder
+                        item["series_product_exists"] = False
+                        item["series_machine_exists"] = True
+                        item["series_product_part_exists"] = True
+                        item["series_product_part_id"] = existing_part["object_id"]
+                    continue
+
+                requested_name = str(
+                    target.get("series_product_name") or ""
+                ).strip()
+                product = (
+                    find_machine_product(
+                        uploader,
+                        machine_code,
+                        product_name=requested_name,
+                        product_folder=requested_folder,
+                    )
+                    if requested_name
+                    else None
+                )
+                folder_name = (
+                    str((product or {}).get("folder_path") or "").strip()
+                    or requested_folder
                 )
                 folder = (
                     uploader.find_product_folder(folder_name)
@@ -1152,10 +1192,20 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                 )
                 for item in target["members"]:
                     item["series_product_folder"] = folder_name
+                    item["series_product_folder_requested"] = requested_folder
+                    if product is not None and str(product.get("name") or "").strip():
+                        item["series_product_name"] = str(product.get("name") or "").strip()
                     item["series_product_exists"] = product is not None
                     item["series_product_part_exists"] = part is not None
                     item["series_product_folder_exists"] = folder is not None
                     item["series_product_folder_will_create"] = False
+                if product is None and not requested_name:
+                    raise CaxaError(
+                        "03整机 %s 的整机零件不存在，"
+                        "请在上传清单中填写对应的系列产品名称"
+                        % machine_code,
+                        stage="series_product_name",
+                    )
                 if folder_name and folder is None:
                     raise CaxaError(
                         "03整机 %s 的系列产品目录 %s 在 CAXA 中不存在；"
@@ -1163,15 +1213,6 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                         "建立或修正系列目录"
                         % (machine_code, folder_name),
                         stage="series_product_folder",
-                    )
-                if product is None and not str(
-                    target.get("series_product_name") or ""
-                ).strip():
-                    raise CaxaError(
-                        "03整机 %s 的系列产品不存在，"
-                        "请在上传清单中对应的系列产品行填写名称"
-                        % machine_code,
-                        stage="series_product_name",
                     )
         else:
             user_id = None
@@ -2059,17 +2100,65 @@ def precheck_with_caxa(
             machine_code = target["machine"]
             if target["family"] == "02":
                 continue
-            folder_name = (
+            requested_folder = (
                 str(target.get("series_product_folder") or "").strip()
                 or drawing_bundle.series_product_folder(machine_code)
             )
-            product = find_machine_product(
-                uploader,
-                machine_code,
-                product_name=str(
-                    target.get("series_product_name") or ""
-                ).strip(),
-                product_folder=folder_name,
+            existing_part = find_existing_machine_part(
+                uploader, machine_code
+            )
+            if existing_part is not None:
+                for item in target["members"]:
+                    item["series_product_folder"] = requested_folder
+                    item["series_product_folder_requested"] = requested_folder
+                    item["series_product_exists"] = False
+                    item["series_machine_exists"] = True
+                    item["series_product_part_exists"] = True
+                    item["series_product_part_id"] = existing_part["object_id"]
+                machine_products.append(
+                    {
+                        "code": machine_code,
+                        "exists": True,
+                        "product_exists": False,
+                        "product_id": None,
+                        "product_name": "",
+                        "part_exists": True,
+                        "part_id": existing_part["object_id"],
+                        "folder": requested_folder,
+                        "requested_folder": requested_folder,
+                        "product_folder_paths": [],
+                        "folder_exists": True,
+                        "folder_will_create": False,
+                        "folder_id": None,
+                        "requested_name": str(
+                            target.get("series_product_name") or ""
+                        ).strip(),
+                        "requires_product_name": False,
+                        "reused_existing_part": True,
+                        "has_machine_drawing": bool(
+                            target.get("has_machine_drawing")
+                        ),
+                        "item_codes": list(target["item_codes"]),
+                    }
+                )
+                continue
+
+            requested_name = str(
+                target.get("series_product_name") or ""
+            ).strip()
+            product = (
+                find_machine_product(
+                    uploader,
+                    machine_code,
+                    product_name=requested_name,
+                    product_folder=requested_folder,
+                )
+                if requested_name
+                else None
+            )
+            folder_name = (
+                str((product or {}).get("folder_path") or "").strip()
+                or requested_folder
             )
             folder = (
                 uploader.find_product_folder(folder_name)
@@ -2081,6 +2170,13 @@ def precheck_with_caxa(
                 if product is not None
                 else None
             )
+            for item in target["members"]:
+                item["series_product_folder"] = folder_name
+                item["series_product_folder_requested"] = requested_folder
+                if product is not None and str(product.get("name") or "").strip():
+                    item["series_product_name"] = str(
+                        product.get("name") or ""
+                    ).strip()
             machine_products.append(
                 {
                     "code": machine_code,
@@ -2091,6 +2187,10 @@ def precheck_with_caxa(
                     "part_exists": part is not None,
                     "part_id": (part or {}).get("object_id"),
                     "folder": folder_name,
+                    "requested_folder": requested_folder,
+                    "product_folder_paths": list(
+                        (product or {}).get("folder_paths") or []
+                    ),
                     "folder_exists": folder is not None if folder_name else True,
                     "folder_will_create": False,
                     "folder_id": (folder or {}).get("object_id"),

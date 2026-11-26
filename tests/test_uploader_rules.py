@@ -56,6 +56,20 @@ class RuleBridge:
             return {"ok": True, "items": []}
         if name in ("find_product", "find_product_in_folder"):
             return {"ok": True, "found": []}
+        if name == "list_products":
+            return {"ok": True, "products": [], "complete": True, "errors": []}
+        if name == "product_root_parts":
+            return {
+                "ok": True,
+                "items": [
+                    {
+                        "product_id": int(product_id),
+                        "root_parts": [],
+                        "root_parts_error": None,
+                    }
+                    for product_id in cmd.get("product_ids") or []
+                ],
+            }
         if name == "find_product_folder":
             keyword = cmd.get("keyword")
             return {
@@ -126,7 +140,9 @@ class RuleUploader(CaxaUploader):
 
     def create_part(self, identity, name=""):
         self.created.append(str(identity).upper())
-        return {"object_id": 70, "identity": identity}
+        part = {"object_id": 70, "identity": identity}
+        self._part_cache[str(identity).upper()] = dict(part)
+        return part
 
     def create_product(self, identity, name, folder_name=""):
         self.created_products.append((str(identity).upper(), name))
@@ -337,7 +353,7 @@ class OwnBorrowTests(unittest.TestCase):
             uploader.link_relation("01.02", "01.03", "borrow")
         self.assertEqual(bridge.link_calls, [])
 
-    def test_newly_created_product_is_reused_without_requery(self):
+    def test_newly_created_machine_part_is_reused_without_product_requery(self):
         bridge = RuleBridge()
         uploader = CaxaUploader(
             bridge,
@@ -356,7 +372,8 @@ class OwnBorrowTests(unittest.TestCase):
             part_name="",
             create_part=False,
         )
-        self.assertEqual(first[0]["object_id"], second[0]["object_id"])
+        self.assertEqual(second[0], {})
+        self.assertEqual(first[1]["object_id"], second[1]["object_id"])
         self.assertEqual(
             sum(1 for call in bridge.calls if call.get("cmd") == "query_objects"),
             1,
@@ -505,7 +522,7 @@ class OwnBorrowTests(unittest.TestCase):
             any(call.get("cmd") == "ensure_product_folder" for call in bridge.calls)
         )
 
-    def test_existing_product_is_relinked_to_expected_folder_once(self):
+    def test_existing_product_is_never_relinked_from_inferred_folder(self):
         class ExistingProductBridge(RuleBridge):
             def call(self, cmd, timeout=240.0, idempotent=None):
                 if cmd.get("cmd") == "query_objects":
@@ -533,19 +550,392 @@ class OwnBorrowTests(unittest.TestCase):
         product, part = uploader.ensure_machine(
             "03.HW.015350-46P01",
             part_name="空气压缩机",
+            product_name="HW1.5-35",
         )
         self.assertEqual(product["object_id"], 501)
         self.assertEqual(part["object_id"], 700)
         uploader.ensure_machine(
             "03.HW.015350-46P01",
             part_name="空气压缩机",
+            product_name="HW1.5-35",
         )
         link_calls = [
             call for call in bridge.calls
             if call.get("cmd") == "link_product_to_folder"
         ]
-        self.assertEqual(len(link_calls), 1)
-        self.assertEqual(link_calls[0]["product_folder"], "HW系列")
+        self.assertEqual(link_calls, [])
+
+    def test_product_index_reuses_nested_products_with_actual_folders_once(self):
+        class NestedIndexBridge(RuleBridge):
+            def call(self, cmd, timeout=240.0, idempotent=None):
+                if cmd.get("cmd") == "query_parts":
+                    self.calls.append(cmd)
+                    keyword = str(cmd.get("keyword") or "").upper()
+                    parts = {
+                        "03.HT.HGB05-05025B": 44135,
+                        "03.HX21.E20H-03L": 44510,
+                    }
+                    object_id = parts.get(keyword)
+                    return {
+                        "ok": True,
+                        "items": (
+                            [
+                                {
+                                    "object_id": object_id,
+                                    "identity": keyword,
+                                    "name": "整机",
+                                }
+                            ]
+                            if object_id is not None
+                            else []
+                        ),
+                    }
+                if cmd.get("cmd") == "query_objects":
+                    self.calls.append(cmd)
+                    return {"ok": True, "items": []}
+                if cmd.get("cmd") == "list_products":
+                    self.calls.append(cmd)
+                    return {
+                        "ok": True,
+                        "complete": True,
+                        "errors": [],
+                        "products": [
+                            {
+                                "object_id": 8101,
+                                "class_id": 1012,
+                                "identity": "03.HT.HGB05-05025",
+                                "name": "HGB5-5/25",
+                                "folder_path": "HT合同特殊/HGB系列",
+                                "folder_paths": ["HT合同特殊/HGB系列"],
+                                "root_parts": [
+                                    {
+                                        "object_id": 44135,
+                                        "identity": "03.HT.HGB05-05025B",
+                                        "name": "氮气增压机",
+                                        "reference": False,
+                                    }
+                                ],
+                            },
+                            {
+                                "object_id": 8102,
+                                "class_id": 1012,
+                                "identity": "03.HX21.E20H-01",
+                                "name": "HX345E(标准型)",
+                                "folder_path": "HX系列",
+                                "folder_paths": ["HX系列"],
+                                "root_parts": [
+                                    {
+                                        "object_id": 44510,
+                                        "identity": "03.HX21.E20H-03L",
+                                        "name": "呼吸空气压缩机",
+                                        "reference": False,
+                                    }
+                                ],
+                            },
+                            {
+                                "object_id": 8999,
+                                "class_id": 1012,
+                                "identity": "03.ZZ.OTHER-01",
+                                "name": "无关产品",
+                                "folder_path": "ZZ系列",
+                                "folder_paths": ["ZZ系列"],
+                            },
+                        ],
+                    }
+                if cmd.get("cmd") == "product_root_parts":
+                    self.calls.append(cmd)
+                    parts = {
+                        8101: [
+                            {
+                                "object_id": 44135,
+                                "identity": "03.HT.HGB05-05025B",
+                                "name": "氮气增压机",
+                                "reference": False,
+                            }
+                        ],
+                        8102: [
+                            {
+                                "object_id": 44510,
+                                "identity": "03.HX21.E20H-03L",
+                                "name": "呼吸空气压缩机",
+                                "reference": False,
+                            }
+                        ],
+                    }
+                    return {
+                        "ok": True,
+                        "items": [
+                            {
+                                "product_id": int(product_id),
+                                "root_parts": parts.get(
+                                    int(product_id), []
+                                ),
+                                "root_parts_error": None,
+                            }
+                            for product_id in cmd.get("product_ids") or []
+                        ],
+                    }
+                return super().call(cmd, timeout, idempotent)
+
+        bridge = NestedIndexBridge()
+        uploader = CaxaUploader(bridge)
+        hgb = uploader.find_product_for_machine(
+            "03.HT.HGB05-05025B",
+            product_folder="HT合同特殊/HGB系列",
+        )
+        hx = uploader.find_product_for_machine(
+            "03.HX21.E20H-03L",
+            product_folder="HX21系列",
+        )
+        self.assertEqual(hgb["object_id"], 8101)
+        self.assertEqual(hgb["found_machine_part"]["object_id"], 44135)
+        self.assertEqual(hgb["folder_path"], "HT合同特殊/HGB系列")
+        self.assertTrue(hgb["found_by_root_part"])
+        self.assertEqual(
+            hgb["matched_product_part"]["object_id"], 44135
+        )
+        self.assertEqual(hx["object_id"], 8102)
+        self.assertEqual(hx["found_machine_part"]["object_id"], 44510)
+        self.assertEqual(hx["folder_path"], "HX系列")
+        self.assertTrue(hx["found_by_root_part"])
+        self.assertEqual(
+            hx["matched_product_part"]["object_id"], 44510
+        )
+        self.assertEqual(
+            sum(1 for call in bridge.calls if call.get("cmd") == "list_products"),
+            1,
+        )
+        list_call = next(
+            call for call in bridge.calls
+            if call.get("cmd") == "list_products"
+        )
+        self.assertFalse(list_call["include_root_parts"])
+        requested_root_part_ids = {
+            int(product_id)
+            for call in bridge.calls
+            if call.get("cmd") == "product_root_parts"
+            for product_id in call.get("product_ids") or []
+        }
+        self.assertEqual(requested_root_part_ids, {8101, 8102})
+        self.assertFalse(
+            any(call.get("cmd") == "find_product_in_folder" for call in bridge.calls)
+        )
+        self.assertEqual(bridge.calls[0]["cmd"], "query_parts")
+
+    def test_advanced_part_query_returns_product_and_folder_without_index(self):
+        class AdvancedProductBridge(RuleBridge):
+            def call(self, cmd, timeout=240.0, idempotent=None):
+                name = cmd.get("cmd")
+                self.calls.append(cmd)
+                if name == "query_parts":
+                    return {
+                        "ok": True,
+                        "items": [
+                            {
+                                "object_id": 44510,
+                                "identity": "03.HX21.E20H-03L",
+                                "name": "呼吸空气压缩机",
+                            }
+                        ],
+                    }
+                if name == "find_product_by_part":
+                    return {
+                        "ok": True,
+                        "items": [
+                            {
+                                "object_id": 1377,
+                                "class_id": 1012,
+                                "class_name": "Product",
+                                "IdentityNo": "03.HX21.E20H-01",
+                                "name": "HX345E(标准型)",
+                            }
+                        ],
+                    }
+                if name == "product_folder_paths":
+                    return {
+                        "ok": True,
+                        "product_id": 1377,
+                        "paths": ["HX系列"],
+                        "complete": True,
+                        "errors": [],
+                    }
+                return super().call(cmd, timeout, idempotent)
+
+        bridge = AdvancedProductBridge()
+        uploader = CaxaUploader(bridge)
+        product = uploader.find_product_for_machine(
+            "03.HX21.E20H-03L",
+            product_folder="HX21系列",
+        )
+        self.assertEqual(product["object_id"], 1377)
+        self.assertEqual(product["identity"], "03.HX21.E20H-01")
+        self.assertEqual(product["folder_path"], "HX系列")
+        self.assertTrue(product["found_by_part_query"])
+        self.assertFalse(
+            any(call.get("cmd") == "list_products" for call in bridge.calls)
+        )
+        self.assertEqual(
+            [call["cmd"] for call in bridge.calls[:3]],
+            ["query_parts", "find_product_by_part", "product_folder_paths"],
+        )
+
+    def test_missing_part_reuses_typed_product_name_without_full_index(self):
+        class NamedProductBridge(RuleBridge):
+            def call(self, cmd, timeout=240.0, idempotent=None):
+                name = cmd.get("cmd")
+                self.calls.append(cmd)
+                if name == "query_parts":
+                    return {"ok": True, "items": []}
+                if name == "query_objects":
+                    return {"ok": True, "items": []}
+                if name == "query_product":
+                    return {
+                        "ok": True,
+                        "items": [
+                            {
+                                "object_id": 1435,
+                                "identity": "03.HT.HG8-100AD",
+                                "name": "SE230900 HG8-100AD",
+                            }
+                        ],
+                    }
+                if name == "product_folder_paths":
+                    return {
+                        "ok": True,
+                        "product_id": 1435,
+                        "paths": ["HT合同特殊"],
+                        "complete": True,
+                        "errors": [],
+                    }
+                return super().call(cmd, timeout, idempotent)
+
+        bridge = NamedProductBridge()
+        uploader = CaxaUploader(bridge)
+        product = uploader.find_product_for_machine(
+            "03.HT.HG8-100AD",
+            product_name="SE230900 HG8-100AD",
+            product_folder="HT合同特殊",
+        )
+        self.assertEqual(product["object_id"], 1435)
+        self.assertEqual(product["folder_path"], "HT合同特殊")
+        self.assertTrue(product["found_by_name_query"])
+        self.assertFalse(
+            any(call.get("cmd") == "list_products" for call in bridge.calls)
+        )
+
+    def test_existing_machine_part_skips_product_resolution(self):
+        class ExistingPartBridge(RuleBridge):
+            def call(self, cmd, timeout=240.0, idempotent=None):
+                name = cmd.get("cmd")
+                self.calls.append(cmd)
+                if name == "query_parts":
+                    return {
+                        "ok": True,
+                        "items": [
+                            {
+                                "object_id": 44510,
+                                "identity": "03.HX21.E20H-03L",
+                                "name": "呼吸空气压缩机",
+                            }
+                        ],
+                    }
+                if name in (
+                    "query_objects",
+                    "find_product_by_part",
+                    "query_product",
+                    "list_products",
+                    "find_product_in_folder",
+                ):
+                    self.fail("existing Part must not resolve Product")
+                return super().call(cmd, timeout, idempotent)
+
+        bridge = ExistingPartBridge()
+        uploader = CaxaUploader(bridge)
+        product, part = uploader.ensure_machine(
+            "03.HX21.E20H-03L",
+            product_folder="HX21系列",
+        )
+        self.assertEqual(product, {})
+        self.assertEqual(part["object_id"], 44510)
+        self.assertFalse(part["created_new_part"])
+
+    def test_partial_product_index_cannot_report_an_authoritative_miss(self):
+        class PartialIndexBridge(RuleBridge):
+            def call(self, cmd, timeout=240.0, idempotent=None):
+                if cmd.get("cmd") == "query_objects":
+                    return {"ok": True, "items": []}
+                if cmd.get("cmd") == "list_products":
+                    return {
+                        "ok": True,
+                        "complete": False,
+                        "errors": [
+                            {
+                                "folder_path": "HX系列",
+                                "area": "products",
+                                "detail": "权限不足",
+                            }
+                        ],
+                        "products": [],
+                    }
+                return super().call(cmd, timeout, idempotent)
+
+        uploader = CaxaUploader(PartialIndexBridge())
+        with self.assertRaises(CaxaError) as caught:
+            uploader.find_product_for_machine(
+                "03.HX21.E20H-03L",
+                product_folder="HX21系列",
+            )
+        self.assertEqual(caught.exception.stage, "product_index_read")
+
+    def test_root_part_full_fallback_finds_product_with_unrelated_identity(self):
+        class UnrelatedIdentityBridge(RuleBridge):
+            def call(self, cmd, timeout=240.0, idempotent=None):
+                if cmd.get("cmd") == "query_objects":
+                    return {"ok": True, "items": []}
+                if cmd.get("cmd") == "list_products":
+                    return {
+                        "ok": True,
+                        "products_complete": True,
+                        "parts_complete": True,
+                        "root_parts_included": False,
+                        "errors": [],
+                        "products": [
+                            {
+                                "object_id": 9100,
+                                "identity": "UNRELATED-PRODUCT",
+                                "name": "无关产品",
+                                "folder_path": "特殊目录",
+                            }
+                        ],
+                    }
+                if cmd.get("cmd") == "product_root_parts":
+                    return {
+                        "ok": True,
+                        "items": [
+                            {
+                                "product_id": 9100,
+                                "root_parts": [
+                                    {
+                                        "object_id": 44510,
+                                        "identity": "03.HX21.E20H-03L",
+                                        "name": "呼吸空气压缩机",
+                                        "reference": False,
+                                    }
+                                ],
+                                "root_parts_error": None,
+                            }
+                        ],
+                    }
+                return super().call(cmd, timeout, idempotent)
+
+        uploader = CaxaUploader(UnrelatedIdentityBridge())
+        product = uploader.find_product_for_machine(
+            "03.HX21.E20H-03L",
+            product_folder="HX21系列",
+        )
+        self.assertEqual(product["object_id"], 9100)
+        self.assertEqual(product["folder_path"], "特殊目录")
+        self.assertTrue(product["found_by_root_part"])
 
 
 class MachineAndClassTests(unittest.TestCase):
@@ -720,6 +1110,151 @@ class MachineAndClassTests(unittest.TestCase):
                 "Z03.HW.025400-11T01",
             ],
         )
+
+    def test_precheck_uses_actual_product_folders_without_full_index(self):
+        class NestedFolderPrecheckUploader:
+            products = {
+                "03.HT.HGB05-05025B": {
+                    "object_id": 8101,
+                    "identity": "03.HT.HGB05-05025B",
+                    "name": "HGB 5.0",
+                    "folder_path": "HT合同特殊/HGB系列",
+                    "folder_paths": ["HT合同特殊/HGB系列"],
+                },
+                "03.HX21.E20H-03L": {
+                    "object_id": 8102,
+                    "identity": "03.HX21.E20H-03L",
+                    "name": "HX21 2.0",
+                    "folder_path": "HX系列",
+                    "folder_paths": ["HX系列"],
+                },
+            }
+            load_calls = 0
+
+            def __init__(self, bridge, log=print, **kwargs):
+                self.bridge = bridge
+
+            def load_product_index(self):
+                type(self).load_calls += 1
+                return {"products": list(self.products.values()), "complete": True}
+
+            def find_product_for_machine(
+                self, machine, product_name="", product_folder=""
+            ):
+                return dict(self.products.get(str(machine).upper()) or {})
+
+            def find_product_folder(self, name):
+                return {"object_id": 401, "identity": name, "path": name}
+
+            def machine_part(self, product_id, identity):
+                return {"object_id": 700 + int(product_id)}
+
+            def find_part_candidates(self, identity):
+                return []
+
+            def find_part(self, identity):
+                return None
+
+            def close(self):
+                return None
+
+        NestedFolderPrecheckUploader.load_calls = 0
+        manifest = {
+            "items": [
+                {
+                    "code": "03.HT.HGB05-05025B",
+                    "kind": "machine_drawing",
+                    "machine": "03.HT.HGB05-05025B",
+                    "series_product_folder": "HT合同特殊/HGB系列",
+                    "series_product_name": "HGB 5.0",
+                    "upload_sel": True,
+                },
+                {
+                    "code": "03.HX21.E20H-03L",
+                    "kind": "machine_drawing",
+                    "machine": "03.HX21.E20H-03L",
+                    "series_product_folder": "HX21系列",
+                    "series_product_name": "HX21 2.0",
+                    "upload_sel": True,
+                },
+            ]
+        }
+        with _support.patch_core(
+            fake_uploader_cls=NestedFolderPrecheckUploader
+        ):
+            info = upload_core.precheck_with_caxa(
+                manifest,
+                _support.ACCOUNT,
+                log=lambda *args: None,
+                journal_path=_support.journal_path(
+                    "product_index_precheck.sqlite3"
+                ),
+            )
+        self.assertEqual(NestedFolderPrecheckUploader.load_calls, 0)
+        rows = {row["code"]: row for row in info["machine_products"]}
+        self.assertEqual(rows["03.HT.HGB05-05025B"]["folder"], "HT合同特殊/HGB系列")
+        self.assertEqual(rows["03.HX21.E20H-03L"]["folder"], "HX系列")
+        self.assertEqual(
+            rows["03.HX21.E20H-03L"]["requested_folder"],
+            "HX21系列",
+        )
+        self.assertEqual(rows["03.HX21.E20H-03L"]["product_name"], "HX21 2.0")
+        self.assertEqual(manifest["items"][1]["series_product_folder"], "HX系列")
+        self.assertEqual(manifest["items"][1]["series_product_name"], "HX21 2.0")
+
+    def test_precheck_existing_machine_part_skips_product_lookup(self):
+        class ExistingMachinePartUploader:
+            def __init__(self, bridge, log=print, **kwargs):
+                self.bridge = bridge
+
+            def find_part_candidates(self, identity):
+                return [
+                    {
+                        "object_id": 44510,
+                        "identity": identity,
+                        "name": "呼吸空气压缩机",
+                    }
+                ]
+
+            def find_product_for_machine(self, *args, **kwargs):
+                self.fail("existing machine Part must not resolve Product")
+
+            def find_product_folder(self, name):
+                self.fail("existing machine Part must not require a folder")
+
+            def close(self):
+                return None
+
+        manifest = {
+            "items": [
+                {
+                    "code": "03.HX21.E20H-03L",
+                    "kind": "machine_drawing",
+                    "machine": "03.HX21.E20H-03L",
+                    "series_product_folder": "HX21系列",
+                    "upload_sel": True,
+                }
+            ]
+        }
+        with _support.patch_core(
+            fake_uploader_cls=ExistingMachinePartUploader
+        ):
+            info = upload_core.precheck_with_caxa(
+                manifest,
+                _support.ACCOUNT,
+                log=lambda *args: None,
+                journal_path=_support.journal_path(
+                    "existing_machine_part.sqlite3"
+                ),
+            )
+        row = info["machine_products"][0]
+        self.assertTrue(row["exists"])
+        self.assertFalse(row["product_exists"])
+        self.assertTrue(row["part_exists"])
+        self.assertFalse(row["requires_product_name"])
+        self.assertEqual(row["folder"], "HX21系列")
+        self.assertEqual(info["missing_product_folders"], [])
+        self.assertEqual(info["missing_product_parts"], [])
 
     def test_precheck_02_leaf_is_creatable_only_when_group_exists(self):
         class HalfPrecheckUploader:
@@ -907,7 +1442,12 @@ class MachineAndClassTests(unittest.TestCase):
             "file_path": self.make_file("03.MACH 整机.pdf"),
         }
         with self.assertRaises(CaxaError) as caught:
-            uploader.upload_item(item, {"03.MACH"}, None)
+            uploader.upload_item(
+                item,
+                {"03.MACH"},
+                None,
+                series_product_name="整机",
+            )
         self.assertTrue(getattr(caught.exception, "partial", False))
         self.assertIn("未能挂接", str(caught.exception))
 
@@ -944,51 +1484,31 @@ class MachineAndClassTests(unittest.TestCase):
         class SeriesProductBridge(RuleBridge):
             def call(self, cmd, timeout=240.0, idempotent=None):
                 name = cmd.get("cmd")
-                if name == "find_product":
+                if name == "query_objects":
+                    self.calls.append(cmd)
+                    return {"ok": True, "items": []}
+                if name == "list_products":
                     self.calls.append(cmd)
                     return {
                         "ok": True,
-                        "found": [
+                        "complete": True,
+                        "errors": [],
+                        "products": [
                             {
                                 "object_id": 1467,
                                 "identity": "OT312100",
                                 "name": "OFT312",
+                                "folder_path": "其他目录",
+                                "folder_paths": ["其他目录"],
                             },
                             {
                                 "object_id": 1693,
                                 "identity": "",
                                 "name": "OFT312",
+                                "folder_path": "OF系列",
+                                "folder_paths": ["OF系列"],
                             },
                         ],
-                    }
-                if name == "find_product_folder":
-                    self.calls.append(cmd)
-                    return {
-                        "ok": True,
-                        "found": [
-                            {
-                                "object_id": 96,
-                                "identity": "",
-                                "name": "OF系列",
-                                "path": "OF系列",
-                            }
-                        ],
-                    }
-                if name == "dump_product_by_id":
-                    self.calls.append(cmd)
-                    product_id = int(cmd["product_id"])
-                    folder_id = 96 if product_id == 1693 else 137
-                    return {
-                        "ok": True,
-                        "product": {
-                            "object_id": product_id,
-                            "children": [
-                                {
-                                    "kind": "product_folder",
-                                    "object_id": folder_id,
-                                }
-                            ],
-                        },
                     }
                 return super().call(cmd, timeout, idempotent)
 
@@ -1009,32 +1529,33 @@ class MachineAndClassTests(unittest.TestCase):
         )
         self.assertEqual(product["object_id"], 1693)
         self.assertEqual(product["name"], "OFT312")
+        self.assertEqual(product["folder_path"], "OF系列")
 
     def test_ambiguous_series_name_in_same_folder_is_blocked(self):
         class DuplicateSeriesBridge(RuleBridge):
             def call(self, cmd, timeout=240.0, idempotent=None):
                 name = cmd.get("cmd")
-                if name == "find_product":
+                if name == "query_objects":
+                    return {"ok": True, "items": []}
+                if name == "list_products":
                     return {
                         "ok": True,
-                        "found": [
-                            {"object_id": 1, "identity": "", "name": "OFT312"},
-                            {"object_id": 2, "identity": "", "name": "OFT312"},
+                        "complete": True,
+                        "errors": [],
+                        "products": [
+                            {
+                                "object_id": 1,
+                                "identity": "",
+                                "name": "OFT312",
+                                "folder_path": "OF系列",
+                            },
+                            {
+                                "object_id": 2,
+                                "identity": "",
+                                "name": "OFT312",
+                                "folder_path": "OF系列",
+                            },
                         ],
-                    }
-                if name == "find_product_folder":
-                    return {
-                        "ok": True,
-                        "found": [{"object_id": 96, "name": "OF系列"}],
-                    }
-                if name == "dump_product_by_id":
-                    return {
-                        "ok": True,
-                        "product": {
-                            "children": [
-                                {"kind": "product_folder", "object_id": 96}
-                            ]
-                        },
                     }
                 return super().call(cmd, timeout, idempotent)
 
@@ -1076,7 +1597,12 @@ class MachineAndClassTests(unittest.TestCase):
             "machine": "03.HG.020100A-11P02",
             "file_path": self.make_file("Z03.HG.020100A-11P02.pdf"),
         }
-        uploader.upload_item(item, {item["code"]}, None)
+        uploader.upload_item(
+            item,
+            {item["code"]},
+            None,
+            series_product_name="existing",
+        )
         material_calls = [
             call for call in bridge.calls
             if call.get("cmd") == "ensure_part_material_code"
@@ -1151,7 +1677,12 @@ class MachineAndClassTests(unittest.TestCase):
             "machine": "03.HW.025400-11T01",
             "file_path": self.make_file("Z03.HW.025400-11T01.pdf"),
         }
-        uploader.upload_item(item, {item["code"]}, None)
+        uploader.upload_item(
+            item,
+            {item["code"]},
+            None,
+            series_product_name="existing",
+        )
         self.assertEqual(uploader.created_products, [])
         self.assertEqual(uploader.created, ["03.HW.025400-11T01"])
         self.assertEqual(uploader.links, [(501, 70, False, True)])
