@@ -41,8 +41,11 @@
   39 个顶层目录；`LSYZ`、`GPZ`、`QT`、`NS`、`SFC`、`SFD`、`OM/OV/OW`、
   `HX21`、`HT/HGB` 均解析到实际目录，`W6` 保持手动。未读取 Product 内容，
   未执行任何上传或关系写入。
-- 版本号已提升为 `1.2.6`，仅生成本地测试候选；尚未 commit、tag、push 或
-  创建 GitHub Release。
+- 版本号已提升为 `1.2.6` 并正式发布：
+  - 远端 `main`：`e1e0f7d7565e94e4c09f4bc96f9079c4fbfc48ad`
+  - tag：`v1.2.6`
+  - Release：
+    `https://github.com/rngt713-art/caxa-drawing-tools/releases/tag/v1.2.6`
 - 抓包确认 CAXA 高级查询直接访问 SQL Server `1433/tcp`，通过
   `T_Product.OBJ_ID = T_ProductPartLink.ROLEA_ID`、
   `T_Part.OBJ_ID = T_ProductPartLink.ROLEB_ID` 和
@@ -66,13 +69,20 @@
     `41b78c7ac2cbaa33913436b46c243175f406b41a43e28e7008e25f102eb35485`
   - helper
     `c34ed1ee08c9d5419ac7b55aecb71f2cd9356eb75c05fdd57f94a843d2bf50aa`
-- `v1.2.6` 本地测试 ZIP：
+- `v1.2.6` 本地留存 ZIP：
   `CAXA_Drawing_Product_Part_Lookup_v1.2.6_test_20261126.zip`，
   ZIP SHA256
   `6196ce1ce700ee6d483bd3646a8f78fb2217d74fd37949b084d5fe06bc04e29d`。
   ZIP 完整性校验通过，包内上传端和 helper 哈希与发布目录一致。
 - PyInstaller 归档已确认内嵌 `caxa/caxa_helper/caxa_helper.exe`；
   8 秒启动冒烟通过，测试进程已清理。
+- GitHub Release 资产回读：
+  - `CAXA-Drawing-Uploader.exe`，digest
+    `sha256:41b78c7ac2cbaa33913436b46c243175f406b41a43e28e7008e25f102eb35485`
+  - `README-v1.2.6.md`，digest
+    `sha256:127f31518af4bfbe2b132923f91c8931122bbb29418d16dae448d8918a49bcf8`
+  - 更新器以 `1.2.5` 检查 `/releases/latest` 时正确选择
+    `CAXA-Drawing-Uploader.exe`。
 - 旧的 v1.2.5 发布哈希和 ZIP 保留为历史记录，不作当前候选分发。
 
 MCP 示例专项：

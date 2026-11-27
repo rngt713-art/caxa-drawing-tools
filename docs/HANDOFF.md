@@ -1,17 +1,19 @@
-# HANDOFF — 图纸上传助手（v1.2.6 本地测试候选）
+# HANDOFF — 图纸上传助手（当前 v1.2.6）
 
-更新时间：2026-11-26。状态：**v1.2.6 已编译为本地测试候选，未推送、
-未创建 tag/Release；尚待用户现场测试**。
+更新时间：2026-11-27。状态：**v1.2.6 已发布**。
 
 > 跨窗口继续工作前必须先读 `docs/BUSINESS_REQUIREMENTS.md`。用户确认的业务规则和
 > 刻意保留的高层→低层兼容回退不是待优化项。
 
-## 2026-11-26 v1.2.6 本地测试候选
+## 2026-11-27 v1.2.6 正式发布
 
-- 版本号已从 `v1.2.5` 提升为 `v1.2.6`，仅用于本地验收：
+- 版本号已从 `v1.2.5` 提升为 `v1.2.6`：
   - `VERSION = 1.2.6`
   - `app/version.py = 1.2.6`
-  - 尚未 commit、tag、push 或创建 GitHub Release。
+  - 远端 `main` 提交：`e1e0f7d7565e94e4c09f4bc96f9079c4fbfc48ad`
+  - annotated tag `v1.2.6`
+  - Release：
+    `https://github.com/rngt713-art/caxa-drawing-tools/releases/tag/v1.2.6`
 - helper 已由当前源码编译：
   - source
     `06880127b334ad6c6a269b80286a8189a6a92772e2587745cafe83e89df40f14`
@@ -27,6 +29,11 @@
     `6196ce1ce700ee6d483bd3646a8f78fb2217d74fd37949b084d5fe06bc04e29d`
   - ZIP 完整性校验通过，包内 EXE/helper 哈希与 `release/SHA256SUMS.txt`
     一致。
+- GitHub Release 资产：
+  - `CAXA-Drawing-Uploader.exe`
+    SHA256 `41b78c7ac2cbaa33913436b46c243175f406b41a43e28e7008e25f102eb35485`
+  - `README-v1.2.6.md`
+  - `/releases/latest` 已被上传端更新器识别为 `v1.2.6`。
 - 系列目录解析最终实现：
   - 预检登录后 helper 读取一次 ProductFolder 树并在会话内缓存；
   - 只读取目录名称和层级，不读取 Product 内容；

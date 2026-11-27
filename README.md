@@ -12,7 +12,7 @@
   `https://github.com/rngt713-art/caxa-drawing-tools.git`
 - 版本号以仓库根目录 `VERSION`、Git tag `vX.Y.Z` 和界面标题标识。日常安装
   EXE 固定名为 `图纸上传助手.exe`，不再把版本号写进文件名。
-- 当前版本：`v1.2.6`（本地测试候选，未推送）。
+- 当前版本：`v1.2.6`。
 
 ## 当前状态
 
