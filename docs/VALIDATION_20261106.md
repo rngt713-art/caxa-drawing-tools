@@ -42,7 +42,7 @@
   `HX21`、`HT/HGB` 均解析到实际目录，`W6` 保持手动。未读取 Product 内容，
   未执行任何上传或关系写入。
 - 版本号已提升为 `1.2.6` 并正式发布：
-  - 远端 `main`：`e1e0f7d7565e94e4c09f4bc96f9079c4fbfc48ad`
+  - Release 目标提交：`e1e0f7d7565e94e4c09f4bc96f9079c4fbfc48ad`
   - tag：`v1.2.6`
   - Release：
     `https://github.com/rngt713-art/caxa-drawing-tools/releases/tag/v1.2.6`

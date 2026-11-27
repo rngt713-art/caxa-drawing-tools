@@ -10,7 +10,7 @@
 - 版本号已从 `v1.2.5` 提升为 `v1.2.6`：
   - `VERSION = 1.2.6`
   - `app/version.py = 1.2.6`
-  - 远端 `main` 提交：`e1e0f7d7565e94e4c09f4bc96f9079c4fbfc48ad`
+  - Release 目标提交：`e1e0f7d7565e94e4c09f4bc96f9079c4fbfc48ad`
   - annotated tag `v1.2.6`
   - Release：
     `https://github.com/rngt713-art/caxa-drawing-tools/releases/tag/v1.2.6`
