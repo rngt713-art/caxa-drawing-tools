@@ -48,20 +48,23 @@ class Smoke
         return null;
     }
 
+    static readonly string LogPath = Path.Combine(Path.GetTempPath(), "caxa_smoke.log");
+
     static void Log(string s)
     {
         try
         {
-            File.AppendAllText(@"C:\Users\user\Documents\Codex\2026-08-15\wo-x\work\smoke_log.txt", s + Environment.NewLine);
+            File.AppendAllText(LogPath, s + Environment.NewLine);
         }
         catch { }
         Console.WriteLine(s);
         Console.Out.Flush();
     }
 
-    static void Main()
+    [STAThread]
+    static void Main(string[] args)
     {
-        try { File.Delete(@"C:\Users\user\Documents\Codex\2026-08-15\wo-x\work\smoke_log.txt"); } catch { }
+        try { File.Delete(LogPath); } catch { }
         Log("step1: start");
         try
         {
@@ -72,7 +75,10 @@ class Smoke
             svc.ApplicationName = "CAXAVAULT";
             Log("step5: appname set, trying dummy login...");
             string u = "__caxa_probe__", p = "__nope__";
-            bool ok = svc.Login(ref u, ref p, "192.168.1.28", 8900);
+            string serverIp = args.Length > 0
+                ? args[0]
+                : (Environment.GetEnvironmentVariable("CAXA_SERVER_IP") ?? "127.0.0.1");
+            bool ok = svc.Login(ref u, ref p, serverIp, 8900);
             Log("step6: login=" + ok + " user=" + u + " HasLogin=" + svc.HasLogin + " LastLoginUser=" + svc.LastLoginUser);
         }
         catch (Exception ex)

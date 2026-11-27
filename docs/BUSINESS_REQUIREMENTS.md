@@ -467,3 +467,16 @@
 - 2026-11-26 已在 `v1.2.5` 上验证该示例的离线拆页、上传包生成、计划预览和
   CAXA 只读预检；真实聊天确认和真实上传仍需在支持 elicitation 的客户端及工作机
   小批验收。未完成真机写操作前，不得把示例描述为“全流程已验证”。
+
+## 15. 2026-11-27 仅限本批新建借用的原地撤回
+
+- 为解决“同批上传时借用关系挂错父级”的现场勘误需求，支持在上传树右键原地撤回
+  CAXA 中**本批新建**的借用关系，同时严格限制以下四道护栏：
+  1. 仅允许撤回 `link_type == "borrow"`（`reference=True`）且本批 `journal`
+     明确记录了 `created_by_batch=True` 与精确 `parent_id/child_id/link_id/link_class_id`
+     的新建借用边；历史已有借用（`"已存在"`）与 `reference=False` 归属关系一律禁止撤回。
+  2. 同一任务一旦存在已确认或待核实的审核打印流程记录，立即锁定并禁止撤回借用。
+  3. 执行前若该任务存在任意待核实操作，先行阻止并转入核实恢复流程。
+  4. 写入前必须按 `parent_id` 回读 `link_endpoints`，校验精确 `link_id` 存在且
+     `reference=True`；helper 侧 `CmdUnlinkPartRelation` 同时开启 `require_reference=True`
+     二次防线；结果不明确时标为 `OP_PENDING`（`relation_unlink_uncertain`），不盲目重试。

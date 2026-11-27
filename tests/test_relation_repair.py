@@ -137,6 +137,7 @@ class FinalRelationRepairTests(unittest.TestCase):
             with self.assertRaises(upload_core.PendingVerificationError):
                 upload_core.upload_bundle(self.manifest, support.ACCOUNT,
                                           journal_path=self.journal_path, start_workflow=True,
+                                          staging_root=os.path.join(self.root, "staging"),
                                           log=lambda *args: None)
             self.assertFalse(bridge.workflows)
         with journal.TaskJournal(self.journal_path) as state:
@@ -304,6 +305,69 @@ class RelationReadbackTests(unittest.TestCase):
         self.assertEqual(lookups.count("01.P"), 1)
         uploader.verify_relation_pairs(relations)
         self.assertEqual(lookups.count("01.P"), 2)
+
+    def test_upload_bundle_cleans_staging_dir_on_success_and_failure(self):
+        with support.temp_dir("staging_cleanup_") as root:
+            staging_root = os.path.join(root, "staging")
+            journal_path = os.path.join(root, "journal.sqlite3")
+            item = support.make_item(root, "01.01", "first")
+            manifest = support.make_manifest([item])
+            result, _ = support.run_upload(
+                manifest, journal_path, staging_root=staging_root
+            )
+            self.assertTrue(result["ok"])
+            self.assertEqual(os.listdir(staging_root), [])
+
+            class FailingUploader(support.FakeUploader):
+                def upload_item(inner, item, *args, **kwargs):
+                    raise upload_core.CaxaError("boom", stage="attach")
+
+            item2 = support.make_item(root, "01.02", "second")
+            manifest2 = support.make_manifest([item2])
+            failed_result, _ = support.run_upload(
+                manifest2,
+                journal_path,
+                uploader_cls=FailingUploader,
+                staging_root=staging_root,
+            )
+            self.assertFalse(failed_result["ok"])
+            self.assertEqual(os.listdir(staging_root), [])
+
+            class CrashingUploader(support.FakeUploader):
+                def upload_item(inner, item, *args, **kwargs):
+                    raise RuntimeError("unexpected crash")
+
+            item3 = support.make_item(root, "01.03", "third")
+            manifest3 = support.make_manifest([item3])
+            with self.assertRaises(RuntimeError):
+                support.run_upload(
+                    manifest3,
+                    journal_path,
+                    uploader_cls=CrashingUploader,
+                    staging_root=staging_root,
+                )
+            self.assertEqual(os.listdir(staging_root), [])
+
+    def test_half_product_target_state_blocks_when_part_info_fails(self):
+        class BrokenPartInfoUploader:
+            def find_product(self, identity):
+                return {"object_id": 2, "identity": identity}
+
+            def find_part_candidates(self, code):
+                if code == "02.A36.02.AR02":
+                    return [{"object_id": 20, "identity": code}]
+                if code == "02.A36.02":
+                    return [{"object_id": 10, "identity": code}]
+                return []
+
+            def part_info(self, part_id):
+                raise RuntimeError("rpc timeout")
+
+        state = upload_core.half_product_target_state(
+            BrokenPartInfoUploader(), "02.A36.02.AR02"
+        )
+        self.assertIn("读取半成品零件关系失败", state["blocked_reason"])
+        self.assertIn("rpc timeout", state["blocked_reason"])
 
 
 if __name__ == "__main__":

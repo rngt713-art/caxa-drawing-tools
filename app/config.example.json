@@ -1,9 +1,9 @@
 {
-  "caxa_server_ip": "192.168.1.28",
+  "caxa_server_ip": "",
   "caxa_server_port": "8900",
   "caxa_user": "",
   "caxa_password_enc": "",
-  "vision_server": "http://127.0.0.1:8080",
+  "vision_server": "http://127.0.0.1:8081",
   "vision_script": "",
   "vision_thinking": false,
   "timeout_seconds": 60,

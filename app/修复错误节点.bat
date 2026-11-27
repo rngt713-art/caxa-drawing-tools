@@ -1,4 +1,7 @@
 @echo off
 chcp 65001 >nul
-"C:\Users\user\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" "%~dp0tools\caxa_repair.py"
+set "PYEXE="
+if exist "%~dp0runtime\python\python.exe" set "PYEXE=%~dp0runtime\python\python.exe"
+if not defined PYEXE set "PYEXE=python"
+"%PYEXE%" "%~dp0tools\caxa_repair.py"
 pause

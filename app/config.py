@@ -19,14 +19,41 @@ class _DataBlob(ctypes.Structure):
     ]
 
 
+def _configure_dpapi_dlls():
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(_DataBlob),
+        wintypes.LPCWSTR,
+        ctypes.POINTER(_DataBlob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(_DataBlob),
+    ]
+    crypt32.CryptProtectData.restype = wintypes.BOOL
+    crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(_DataBlob),
+        ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(_DataBlob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(_DataBlob),
+    ]
+    crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    return crypt32, kernel32
+
+
 def _dpapi_protect(data: bytes) -> bytes:
     source_buffer = ctypes.create_string_buffer(data)
     source = _DataBlob(
         len(data), ctypes.cast(source_buffer, ctypes.POINTER(ctypes.c_byte))
     )
     target = _DataBlob()
-    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    crypt32, kernel32 = _configure_dpapi_dlls()
     if not crypt32.CryptProtectData(
         ctypes.byref(source),
         "caxa-uploader",
@@ -40,7 +67,8 @@ def _dpapi_protect(data: bytes) -> bytes:
     try:
         return ctypes.string_at(target.pbData, target.cbData)
     finally:
-        kernel32.LocalFree(target.pbData)
+        if target.pbData:
+            kernel32.LocalFree(ctypes.cast(target.pbData, ctypes.c_void_p))
 
 
 def _dpapi_unprotect(data: bytes) -> bytes:
@@ -49,8 +77,7 @@ def _dpapi_unprotect(data: bytes) -> bytes:
         len(data), ctypes.cast(source_buffer, ctypes.POINTER(ctypes.c_byte))
     )
     target = _DataBlob()
-    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    crypt32, kernel32 = _configure_dpapi_dlls()
     if not crypt32.CryptUnprotectData(
         ctypes.byref(source),
         None,
@@ -64,7 +91,8 @@ def _dpapi_unprotect(data: bytes) -> bytes:
     try:
         return ctypes.string_at(target.pbData, target.cbData)
     finally:
-        kernel32.LocalFree(target.pbData)
+        if target.pbData:
+            kernel32.LocalFree(ctypes.cast(target.pbData, ctypes.c_void_p))
 
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
@@ -79,7 +107,7 @@ DEFAULTS = {
     "caxa_user": "",
     "caxa_password_enc": "",
     "vision_server": "http://127.0.0.1:8081",
-    "vision_script": r"C:\Users\user\.codex\skills\local-vision\scripts\start_server.ps1",
+    "vision_script": "",
     "vision_thinking": False,
     "timeout_seconds": 60,
     "pending_folder": "",

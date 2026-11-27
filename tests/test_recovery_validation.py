@@ -2,12 +2,18 @@
 import contextlib
 import io
 import json
+import os
 import queue
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import _support
+
+_STUB_DEPS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_stub_deps")
+if _STUB_DEPS not in sys.path:
+    sys.path.append(_STUB_DEPS)
 import journal
 import upload_recover
 

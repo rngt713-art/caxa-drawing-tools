@@ -1,8 +1,8 @@
-# 打包“源码交付”压缩包：默认排除旧 helper exe、__pycache__、本机 config.json、
+﻿# 打包“源码交付”压缩包：默认排除旧 helper exe、__pycache__、本机 config.json、
 # 构建产物和测试临时目录，并生成 SHA256SUMS.txt 便于核对。
 #
-#   powershell -ExecutionPolicy Bypass -File .\pack_source.ps1
-#   powershell -ExecutionPolicy Bypass -File .\pack_source.ps1 -IncludeHelperExe   # 仅当 exe 确为新编译
+#   pwsh -NoProfile -ExecutionPolicy Bypass -File .\pack_source.ps1
+#   pwsh -NoProfile -ExecutionPolicy Bypass -File .\pack_source.ps1 -IncludeHelperExe   # 仅当 exe 确为新编译
 #
 # 说明：默认不包含 caxa_helper.exe，避免把旧二进制冒充新版本；工作设备请用
 # build_all.ps1 -Helper 重新编译并核对 SHA-256。
@@ -17,15 +17,12 @@ $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
 
 $excludeDirs = @(
-    "__pycache__", ".pytest_cache", "build", "dist", "output", "tests\_tmp", ".git"
+    "__pycache__", ".pytest_cache", "build", "dist", "output", "tests/_tmp", ".git", "vendor", "work", "tmp"
 )
 $excludeFiles = @(
     "config.json", "*.pyc", "*.pyo", "STATUS.json.tmp",
-    "caxa_helper.exe.bak-*"
+    "caxa_helper.exe.bak-*", "*.sqlite3", "*.sqlite3-shm", "*.sqlite3-wal", "*.log"
 )
-if (-not $IncludeHelperExe) {
-    $excludeFiles += "caxa_helper.exe"
-}
 
 $staging = Join-Path ([System.IO.Path]::GetTempPath()) ("dsh_fix_pack_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Path $staging | Out-Null
@@ -34,12 +31,15 @@ try {
     Push-Location $Root
     $files = Get-ChildItem -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
         $relative = ($_.FullName.Substring($Root.Length).TrimStart('\', '/') -replace '\\', '/')
-        foreach ($dir in @("__pycache__", "build", "dist", "output", ".git", ".pytest_cache")) {
+        foreach ($dir in $excludeDirs) {
             if (("/" + $relative + "/") -like "*/$dir/*") { return $false }
         }
-        if ($relative -like "tests/_tmp/*") { return $false }
         if ($relative -like "tests/probe_*" -or $relative -like "tests/tmp*") { return $false }
-        if ($relative -like "work/*") { return $false }
+        if ($_.Extension -ieq ".exe") {
+            if (-not $IncludeHelperExe -or $relative -ne "app/caxa/caxa_helper/caxa_helper.exe") {
+                return $false
+            }
+        }
         foreach ($pattern in $excludeFiles) {
             if ($_.Name -like $pattern) { return $false }
         }

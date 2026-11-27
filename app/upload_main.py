@@ -33,11 +33,14 @@ import drawing_bundle  # noqa: E402
 import journal as journal_module  # noqa: E402
 import upload_ui_logic as ui_logic  # noqa: E402
 from upload_core import (  # noqa: E402
+    PendingVerificationError,
     apply_manual_borrows,
+    batch_undoable_borrows,
     collect_machine_targets,
     content_digest,
     precheck_with_caxa,
     preview_bundle,
+    undo_batch_borrow,
     upload_bundle,
 )
 from recovery_verifier import (  # noqa: E402
@@ -371,7 +374,10 @@ class UploadApp(TkinterDnD.Tk):
             pass
         try:
             image = tk.PhotoImage(file=resource_path(os.path.join("assets", "app-icon.png")))
-            self.iconphoto(True, image.subsample(8), image.subsample(16))
+            small_icon = image.subsample(8)
+            tiny_icon = image.subsample(16)
+            self._window_icons = (image, small_icon, tiny_icon)
+            self.iconphoto(True, small_icon, tiny_icon)
         except (OSError, tk.TclError):
             self.log("窗口图标加载失败：%s" % icon)
 
@@ -611,6 +617,8 @@ class UploadApp(TkinterDnD.Tk):
         self.tree.bind("<ButtonPress-1>", self._begin_row_drag, add="+")
         self.tree.bind("<B1-Motion>", self._begin_row_drag_motion, add="+")
         self.tree.bind("<ButtonRelease-1>", self._finish_row_drag, add="+")
+        self.tree.bind("<Escape>", self._cancel_row_drag, add="+")
+        self.tree.bind("<FocusOut>", self._cancel_row_drag, add="+")
         self.tree.bind("<Button-3>", self._show_row_menu)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
 
@@ -989,6 +997,54 @@ class UploadApp(TkinterDnD.Tk):
                             result["failed"],
                         ),
                     )
+                elif kind == "undo_borrow_done":
+                    parent_code, child_code, result = payload
+                    cleaned = ui_logic.remove_unlinked_relation(
+                        self.relations,
+                        self.manual_borrows,
+                        parent_code,
+                        child_code,
+                    )
+                    self.relations = cleaned["relations"]
+                    self.manual_borrows = cleaned["manual_borrows"]
+                    if self.bundle is not None:
+                        self.bundle["relations"] = self.relations
+                        self.bundle["manual_borrows"] = self.manual_borrows
+                    self._sync_relation_item_fields()
+                    self.set_busy(False)
+                    self.refresh_tree()
+                    self.status_var.set(
+                        "已撤回本批借用：%s ← %s" % (parent_code, child_code)
+                    )
+                    messagebox.showinfo(
+                        "撤回本批借用",
+                        "%s ← %s：%s。\n"
+                        "本地上传计划已同步移除该错误借用；如需改挂其他父级，请在树中重新建立关系后点击“开始上传”。"
+                        % (
+                            parent_code,
+                            child_code,
+                            result.get("note") or "已解除本批新建借用",
+                        ),
+                    )
+                elif kind == "undo_borrow_pending":
+                    parent_code, child_code, reason = payload
+                    for relation in self.relations:
+                        if (
+                            drawing_bundle.normalize_code(relation.get("parent_code"))
+                            == drawing_bundle.normalize_code(parent_code)
+                            and drawing_bundle.normalize_code(relation.get("child_code"))
+                            == drawing_bundle.normalize_code(child_code)
+                        ):
+                            relation["link_status"] = "待核实"
+                            relation["note"] = reason
+                            relation["created_by_batch"] = False
+                    self.set_busy(False)
+                    self.refresh_tree()
+                    self.status_var.set("撤回借用结果待核实：%s ← %s" % (parent_code, child_code))
+                    messagebox.showwarning(
+                        "撤回结果待核实",
+                        "%s\n\n请到“核实待定结果”中查看并确认 CAXA 实际状态。" % reason,
+                    )
                 elif kind == "recovery_done":
                     successes, failures = payload
                     self.set_busy(False)
@@ -1048,7 +1104,11 @@ class UploadApp(TkinterDnD.Tk):
             except tk.TclError:
                 pass
         finally:
-            self._poll_after_id = self.after(150, self._poll_events)
+            try:
+                if self.winfo_exists():
+                    self._poll_after_id = self.after(150, self._poll_events)
+            except tk.TclError:
+                pass
 
     def destroy(self):
         if self._update_after_id is not None:
@@ -1756,6 +1816,7 @@ class UploadApp(TkinterDnD.Tk):
             self.items = list(bundle.get("items") or [])
             self.manual_borrows = list(bundle.get("manual_borrows") or [])
             self.relations = drawing_bundle.normalize_manifest_relations(bundle)
+            self._hydrate_batch_undoable_borrows()
             self._sync_relation_item_fields()
             self.bundle_var.set(str(manifest_path.parent))
             self.refresh_tree()
@@ -1984,6 +2045,8 @@ class UploadApp(TkinterDnD.Tk):
                         )
                     elif relation.get("existing_original"):
                         relation_label += " [已有原件→借用]"
+                    if ui_logic.is_batch_undoable_borrow(relation):
+                        relation_label += " [本批新建]"
                     if relation.get("manual_override"):
                         relation_label += " [人工]"
                 kind_text = KIND_LABEL.get(
@@ -2036,6 +2099,8 @@ class UploadApp(TkinterDnD.Tk):
                     )
                 elif (relation or {}).get("existing_original"):
                     relation_label += " [已有原件→借用]"
+                if ui_logic.is_batch_undoable_borrow(relation):
+                    relation_label += " [本批新建]"
                 values = (
                     "设计树节点",
                     "",
@@ -2473,6 +2538,19 @@ class UploadApp(TkinterDnD.Tk):
             except tk.TclError:
                 self._drag_target_row = ""
 
+    def _cancel_row_drag(self, _event=None):
+        if (
+            not self._drag_started
+            and not self._drag_source_rows
+            and not self._drag_source_row
+        ):
+            return
+        self._clear_drag_visuals()
+        self._drag_source_row = ""
+        self._drag_source_rows = ()
+        self._drag_started = False
+        self._drag_origin = None
+
     def _clear_drag_visuals(self):
         self._set_drag_target("")
         if self._drag_ghost is not None:
@@ -2628,7 +2706,15 @@ class UploadApp(TkinterDnD.Tk):
         series_path = self._tree_product_groups.get(row, "")
         relation = self._tree_relations.get(row)
         code = self._tree_codes.get(row, "")
+        previous_menu = getattr(self, "_row_menu", None)
+        destroy_menu = getattr(previous_menu, "destroy", None)
+        if callable(destroy_menu):
+            try:
+                destroy_menu()
+            except tk.TclError:
+                pass
         menu = tk.Menu(self, tearoff=False)
+        self._row_menu = menu
         if series_path:
             menu.add_command(
                 label="修改上传目标系列…",
@@ -2677,6 +2763,11 @@ class UploadApp(TkinterDnD.Tk):
                 label="从计划中移除此关系",
                 command=self.delete_selected_relation,
             )
+            if ui_logic.is_batch_undoable_borrow(relation):
+                menu.add_command(
+                    label="撤回 CAXA 借用（仅限本批）…",
+                    command=lambda rel=relation: self.undo_selected_batch_borrow(rel),
+                )
         elif code and any(relation.get("parent_code") == code for relation in self.relations):
             menu.add_separator()
             menu.add_command(
@@ -3340,6 +3431,7 @@ class UploadApp(TkinterDnD.Tk):
                         continue
                     if drawing_bundle.normalize_code(other.get("parent_code")) == old_code:
                         other["parent_code"] = new_code
+                    if drawing_bundle.normalize_code(other.get("borrow_to")) == old_code:
                         other["borrow_to"] = new_code
             if old_parent and (not new_link_type or new_parent != old_parent):
                 self.relations = [
@@ -3498,6 +3590,92 @@ class UploadApp(TkinterDnD.Tk):
             args=(snapshot, settings),
             daemon=True,
         ).start()
+
+    def _hydrate_batch_undoable_borrows(self):
+        if self.bundle is None or not self.relations:
+            return
+        try:
+            ip = str(self.ip_var.get() or "").strip()
+            user = str(self.user_var.get() or "").strip()
+            port = int(str(self.port_var.get() or "0").strip() or 0)
+        except (TypeError, ValueError, tk.TclError):
+            return
+        if not ip or not user or port <= 0:
+            return
+        try:
+            undoable = batch_undoable_borrows(
+                self.bundle,
+                {"ip": ip, "port": port, "user": user, "password": ""},
+            )
+            ui_logic.hydrate_batch_undoable_borrows(self.relations, undoable)
+        except Exception:
+            pass
+
+    def undo_selected_batch_borrow(self, relation: dict | None = None):
+        if self._blocked_by_busy():
+            return
+        if self._blocked_by_update():
+            return
+        if relation is None:
+            selection = self.tree.selection()
+            relation = self._tree_relations.get(selection[0]) if selection else None
+        if not ui_logic.is_batch_undoable_borrow(relation):
+            messagebox.showwarning(
+                "不可撤回",
+                "仅允许撤回本批新建且尚未发起审核流程的借用关系。",
+            )
+            return
+        parent_code = drawing_bundle.normalize_code(relation.get("parent_code"))
+        child_code = drawing_bundle.normalize_code(relation.get("child_code"))
+        task_id = str(relation.get("batch_task_id") or "")
+        try:
+            settings = self._build_settings()
+        except ui_logic.SettingsError as exc:
+            messagebox.showwarning("撤回本批借用", str(exc))
+            return
+        answer = messagebox.askyesno(
+            "撤回本批 CAXA 借用",
+            "确认解除本批新建的借用关系？\n\n"
+            "父级：%s\n"
+            "子级：%s\n\n"
+            "仅删除 CAXA 中本批新建的这一条借用链接，不会删除零件或图纸，"
+            "也不会影响历史已有借用。"
+            % (parent_code, child_code),
+        )
+        if not answer:
+            return
+        self._note_identity(settings)
+        if not self._save_settings():
+            return
+        self._ensure_batch_id()
+        snapshot = ui_logic.snapshot_manifest(self.bundle)
+        self.set_busy(True)
+        self.status_var.set("正在撤回本批借用：%s ← %s…" % (parent_code, child_code))
+        threading.Thread(
+            target=self._undo_borrow_worker,
+            args=(snapshot, settings, parent_code, child_code, task_id),
+            daemon=True,
+        ).start()
+
+    def _undo_borrow_worker(self, snapshot, settings, parent_code, child_code, task_id):
+        try:
+            result = undo_batch_borrow(
+                snapshot,
+                ui_logic.account_from(settings),
+                parent_code,
+                child_code,
+                task_id=task_id,
+                log=self.log,
+            )
+            self.events.put(("undo_borrow_done", (parent_code, child_code, result)))
+        except PendingVerificationError as exc:
+            self.events.put(
+                ("undo_borrow_pending", (parent_code, child_code, str(exc)))
+            )
+        except Exception as exc:
+            self.events.put(
+                ("task_error", "撤回借用失败 %s: %s" % (type(exc).__name__, exc))
+            )
 
     def _manual_borrow_worker(self, snapshot, settings):
         try:

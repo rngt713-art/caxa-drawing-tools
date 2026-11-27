@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, call
 
 import _support  # noqa: F401
+from caxa import bridge as bridge_module
 from caxa.bridge import CaxaBridge, CaxaError
 
 
@@ -64,6 +65,33 @@ class BridgeProtocolTests(unittest.TestCase):
         }
         self.assertEqual(bridge._send_raw.call_args_list, [call(command)] * 2)
         bridge._drop_process.assert_called_once_with()
+
+    def test_product_folder_index_is_idempotent_read_command(self):
+        self.assertIn("product_folder_index", bridge_module.READ_COMMANDS)
+
+    def test_stop_closes_pipes_and_waits_for_logout(self):
+        proc = SimpleNamespace(
+            stdin=Mock(),
+            stdout=Mock(),
+            stderr=Mock(),
+            poll=Mock(side_effect=[None, 0, 0, 0]),
+            wait=Mock(return_value=0),
+            terminate=Mock(),
+            kill=Mock(),
+        )
+        bridge = CaxaBridge()
+        bridge._proc = proc
+        bridge._logged_in = True
+
+        bridge.stop()
+
+        proc.stdin.write.assert_called_once_with('{"cmd":"logout"}\n')
+        proc.stdin.flush.assert_called_once_with()
+        proc.stdin.close.assert_called_once_with()
+        proc.wait.assert_called_once_with(timeout=2.0)
+        proc.terminate.assert_not_called()
+        proc.stdout.close.assert_called_once_with()
+        proc.stderr.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

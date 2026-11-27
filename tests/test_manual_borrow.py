@@ -103,6 +103,44 @@ class ManualBorrowTests(unittest.TestCase):
             ["已借用", "待核实"],
         )
 
+    def test_pending_manual_borrow_preserves_error_note_and_exception_marks_task_failed(self):
+        import journal as journal_module
+
+        def lost(self, parent, child, link_type, **kwargs):
+            raise CaxaError("lost reply", response_lost=True)
+
+        journal_path = _support.journal_path("manual_note.sqlite3")
+        with _support.patch_core():
+            original = _support.FakeUploader.link_relation
+            _support.FakeUploader.link_relation = lost
+            try:
+                result = upload_core.apply_manual_borrows(
+                    self.manifest([_support.relation("03.HW.001", "04.001", "borrow")]),
+                    _support.ACCOUNT,
+                    log=lambda *args: None,
+                    journal_path=journal_path,
+                )
+            finally:
+                _support.FakeUploader.link_relation = original
+        with journal_module.TaskJournal(journal_path) as state:
+            op = state.get_operation(result["task_id"], "relation", "03.HW.001|04.001")
+            self.assertIn("lost reply", op["error"])
+
+        fail_journal = _support.journal_path("manual_fail.sqlite3")
+        with _support.patch_core() as bridge:
+            bridge.login = lambda *args, **kwargs: (_ for _ in ()).throw(CaxaError("login down"))
+            with self.assertRaises(CaxaError):
+                upload_core.apply_manual_borrows(
+                    self.manifest([_support.relation("03.HW.001", "04.001", "borrow")]),
+                    _support.ACCOUNT,
+                    log=lambda *args: None,
+                    journal_path=fail_journal,
+                )
+        with journal_module.TaskJournal(fail_journal) as state:
+            tasks = state.list_tasks()
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0]["status"], journal_module.TASK_FAILED)
+
 
 if __name__ == "__main__":
     unittest.main()

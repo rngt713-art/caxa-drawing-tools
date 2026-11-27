@@ -45,6 +45,29 @@ class HelperConfirmationGuardTests(unittest.TestCase):
                 result = subprocess.run([self.exe, outcome], capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_helper_win32_entrypoint_button_guard_and_max_json_length(self):
+        source = Path(
+            _support.APP_DIR, "caxa", "caxa_helper", "caxa_helper.cs"
+        ).read_text(encoding="utf-8")
+        self.assertIn('EntryPoint = "SendMessageTimeoutW"', source)
+        self.assertIn("MaxJsonLength = int.MaxValue", source)
+        click_start = source.index("static bool ClickChildContaining(")
+        click_end = source.index("static readonly object _logLock", click_start)
+        self.assertIn("IsButtonControl(h)", source[click_start:click_end])
+
+    def test_helper_unlink_enforces_require_reference_and_link_returns_class_id(self):
+        source = Path(
+            _support.APP_DIR, "caxa", "caxa_helper", "caxa_helper.cs"
+        ).read_text(encoding="utf-8")
+        unlink_start = source.index("static Dictionary<string, object> CmdUnlinkPartRelation(")
+        unlink_end = source.index("static List<IEAPProductEntity> GetAllProductsList()", unlink_start)
+        unlink_body = source[unlink_start:unlink_end]
+        self.assertIn("require_reference", unlink_body)
+        self.assertIn("!match.Reference", unlink_body)
+        link_start = source.index("static Dictionary<string, object> CmdLinkPartCore(")
+        link_end = source.index("static int Main(", link_start)
+        self.assertIn('"link_class_id"', source[link_start:link_end])
+
 
 HARNESS = """
 using System;

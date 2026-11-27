@@ -2180,8 +2180,6 @@ class CaxaUploader:
                         or (self._general_product or {}).get("object_id"),
                     },
                 ) from ex
-        if code.startswith("02."):
-            self.ensure_product_owner(part, code)
         self.ensure_part_material_code(part["object_id"], code)
         result = self.attach_file(
             part["object_id"], staged.path, drawing_type, file_name, draw_no=code, kind=kind
@@ -2229,6 +2227,58 @@ class CaxaUploader:
                 return False
             return None
         return bool(value)
+
+    def _find_endpoint_link(
+        self,
+        parent_id: int,
+        child_id: int,
+        info: dict,
+        *,
+        link_id: int = 0,
+        link_class_id: int = 0,
+    ) -> tuple[dict | None, bool]:
+        endpoints = info.get("link_endpoints")
+        endpoints_complete = (
+            isinstance(endpoints, list)
+            and not info.get("link_endpoints_error")
+            and not info.get("link_endpoints_session")
+            and not info.get("refresh_error")
+        )
+        matched = None
+        for endpoint in endpoints if isinstance(endpoints, list) else ():
+            try:
+                source_id = int(endpoint["roleA"]["object_id"])
+                target_id = int(endpoint["roleB"]["object_id"])
+                if (
+                    source_id != parent_id
+                    or target_id <= 0
+                    or endpoint.get("link_error")
+                ):
+                    raise ValueError("unresolved link")
+            except (KeyError, TypeError, ValueError):
+                endpoints_complete = False
+                continue
+            if target_id != child_id:
+                continue
+            ep_link_id = int(endpoint.get("link_id") or 0)
+            ep_link_class = int(
+                endpoint.get("link_class") or endpoint.get("link_class_id") or 0
+            )
+            if link_id > 0:
+                if ep_link_id <= 0:
+                    endpoints_complete = False
+                    continue
+                if ep_link_id != link_id:
+                    continue
+            if (
+                link_class_id > 0
+                and ep_link_class > 0
+                and ep_link_class != link_class_id
+            ):
+                continue
+            matched = endpoint
+            break
+        return matched, endpoints_complete
 
     def _relation_children(self, parent_id: int, info: dict) -> tuple[dict[int, bool | None], str]:
         """Read positive links from either API and use complete lists for absence."""
@@ -2489,7 +2539,7 @@ class CaxaUploader:
             return row
 
         try:
-            self.link_part(parent_id, child_id, reference=is_reference)
+            link_res = self.link_part(parent_id, child_id, reference=is_reference)
         except CaxaError as ex:
             row["status"] = "待核实" if getattr(ex, "uncertain", False) else "失败"
             row["note"] = str(ex)
@@ -2520,8 +2570,114 @@ class CaxaUploader:
             )
             return row
         row["status"] = "已归属" if link_type == "own" else "已借用"
+        if row["status"] == "已借用":
+            link_id = 0
+            link_class_id = 0
+            if isinstance(link_res, dict):
+                try:
+                    link_id = int(link_res.get("link_id") or 0)
+                except (TypeError, ValueError):
+                    link_id = 0
+                try:
+                    link_class_id = int(link_res.get("link_class_id") or 0)
+                except (TypeError, ValueError):
+                    link_class_id = 0
+            if link_id <= 0:
+                try:
+                    matched_ep, _ = self._find_endpoint_link(
+                        int(parent_id), int(child_id), self.part_info(int(parent_id))
+                    )
+                    if matched_ep and self._as_bool(matched_ep.get("reference")) is True:
+                        link_id = int(matched_ep.get("link_id") or 0)
+                        if link_class_id <= 0:
+                            link_class_id = int(
+                                matched_ep.get("link_class")
+                                or matched_ep.get("link_class_id")
+                                or 0
+                            )
+                except Exception:
+                    pass
+            if link_id > 0:
+                row["created_by_batch"] = True
+                row["parent_id"] = int(parent_id)
+                row["child_id"] = int(child_id)
+                row["link_id"] = link_id
+                row["link_class_id"] = link_class_id if link_class_id > 0 else 1037
         self.log("%s：%s ← %s" % (row["status"], parent_code, child_code))
         return row
+
+    def unlink_batch_borrow(
+        self,
+        parent_code: str,
+        child_code: str,
+        *,
+        parent_id: int,
+        child_id: int,
+        link_id: int,
+        link_class_id: int = 1037,
+    ) -> dict:
+        """Unlink a single borrow relation created by the current batch."""
+        parent_code = drawing_bundle.normalize_code(parent_code)
+        child_code = drawing_bundle.normalize_code(child_code)
+        parent_id = int(parent_id or 0)
+        child_id = int(child_id or 0)
+        link_id = int(link_id or 0)
+        link_class_id = int(link_class_id or 0)
+        if parent_id <= 0 or child_id <= 0 or link_id <= 0 or link_class_id <= 0:
+            raise CaxaError(
+                "缺少精确的关系对象 ID，拒绝执行借用撤回",
+                stage="unlink_borrow_guard",
+            )
+        info = self.part_info(parent_id)
+        matched, endpoints_complete = self._find_endpoint_link(
+            parent_id,
+            child_id,
+            info,
+            link_id=link_id,
+            link_class_id=link_class_id,
+        )
+        if matched is not None:
+            if self._as_bool(matched.get("reference")) is not True:
+                raise CaxaError(
+                    "目标关系不是借用关系，已拒绝撤回",
+                    stage="unlink_borrow_guard",
+                )
+        elif endpoints_complete:
+            return {
+                "status": "已解除",
+                "already_unlinked": True,
+                "parent_code": parent_code,
+                "child_code": child_code,
+                "parent_id": parent_id,
+                "child_id": child_id,
+                "link_id": link_id,
+                "link_class_id": link_class_id,
+                "note": "该借用关系在 CAXA 中已不存在",
+            }
+        else:
+            raise CaxaError(
+                "无法回读验证目标借用关系，未执行撤回",
+                stage="unlink_borrow_precheck",
+            )
+        self.bridge.unlink_part_relation(
+            parent_id,
+            child_id,
+            link_id,
+            link_class_id,
+            require_reference=True,
+        )
+        self.log("已解除本批新建借用：%s ← %s（link_id=%d）" % (parent_code, child_code, link_id))
+        return {
+            "status": "已解除",
+            "already_unlinked": False,
+            "parent_code": parent_code,
+            "child_code": child_code,
+            "parent_id": parent_id,
+            "child_id": child_id,
+            "link_id": link_id,
+            "link_class_id": link_class_id,
+            "note": "已解除本批新建借用",
+        }
 
     def borrow_under(self, parent_code: str, codes: list,
                      skip_codes: set | None = None,

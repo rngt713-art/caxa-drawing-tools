@@ -449,6 +449,19 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(_support.FakeUploader.instances[-1].relations), 1)
         self.assertEqual(len(_support.FakeUploader.instances[-1].relations), 1)
 
+    def test_empty_stale_lock_is_recovered_and_pid_alive_checks_processes(self):
+        self.assertTrue(journal._pid_alive(os.getpid()))
+        self.assertFalse(journal._pid_alive(999999999))
+        with journal.TaskJournal(self.journal_file) as state:
+            lock_file = state.lock_path("stale_empty")
+            with open(lock_file, "w", encoding="utf-8"):
+                pass
+            stale_time = os.path.getmtime(lock_file) - 30.0
+            os.utime(lock_file, (stale_time, stale_time))
+            with state.run_lock("stale_empty"):
+                self.assertTrue(os.path.isfile(lock_file))
+            self.assertFalse(os.path.isfile(lock_file))
+
 
 if __name__ == "__main__":
     unittest.main()

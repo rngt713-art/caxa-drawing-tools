@@ -421,6 +421,51 @@ class UpdateCheckerTests(unittest.TestCase):
         self.assertNotIn("_MEIPASS2", environment)
         self.assertEqual(environment["KEEP_ME"], "yes")
 
+    def test_download_update_rejects_non_https_urls(self):
+        for bad_url in ("file:///C:/temp/evil.exe", "http://example.test/app.exe"):
+            with self.subTest(bad_url=bad_url):
+                info = update_checker.UpdateInfo(
+                    available=True,
+                    current_version="1.0.0",
+                    latest_version="1.1.0",
+                    tag_name="v1.1.0",
+                    asset_name="图纸上传助手.exe",
+                    download_url=bad_url,
+                    sha256="a" * 64,
+                )
+                with self.assertRaises(update_checker.UpdateError):
+                    update_checker.download_update(info)
+
+    def test_apply_update_rollback_retries_transient_replace_error(self):
+        real_replace = os.replace
+        transient = PermissionError("busy")
+        transient.winerror = 32
+
+        with _support.temp_dir("update_rollback_retry_") as directory:
+            old = Path(directory) / "installed.exe"
+            old.write_bytes(b"old-version")
+            source = Path(directory) / "new-version.exe"
+            source.write_bytes(b"new-version")
+            sleep_calls = []
+            rollback_failures = iter([transient])
+
+            def flaky_replace(src, dst):
+                if ".old-" in Path(src).name:
+                    err = next(rollback_failures, None)
+                    if err is not None:
+                        raise err
+                real_replace(src, dst)
+
+            with patch.object(os, "replace", side_effect=flaky_replace):
+                with self.assertRaises(update_checker.UpdateError):
+                    update_checker.apply_update(
+                        old, 456, source_exe=source, wait_exit=lambda _pid: None,
+                        popen=lambda *_a, **_k: (_ for _ in ()).throw(OSError("launch failed")),
+                        sleep=sleep_calls.append,
+                    )
+            self.assertEqual(old.read_bytes(), b"old-version")
+            self.assertEqual(sleep_calls, [0.2])
+
 
 if __name__ == "__main__":
     unittest.main()

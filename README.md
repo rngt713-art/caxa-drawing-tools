@@ -60,7 +60,7 @@ pack_source.ps1      源码交付包脚本
 [本轮修复说明](docs/FIXES_AND_PERFORMANCE_20261113.md)。
 
 1. 在工作机安装兼容的 CAXA 协同管理 2011 客户端。
-2. 从 GitHub Releases 下载并运行 `CAXA-Drawing-Uploader.exe`。首次使用请填写 CAXA 服务器地址。
+2. 从 GitHub Releases 下载并运行 `图纸上传助手.exe`。首次使用请填写 CAXA 服务器地址。
 3. 导入识别助手生成的上传包，或拖入按 `图号 名称.pdf` 命名的 PDF。
    导入时会按图号的直接上级前缀自动建立组件层级，例如
    `...-01-03-01` 自动挂到本批已有的 `...-01-03`。
@@ -97,14 +97,14 @@ pack_source.ps1      源码交付包脚本
 在工作机安装 Python 3.11+、CAXA 2011r3、PyInstaller 与 `tkinterdnd2` 后运行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build_all.ps1 -All
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\build_all.ps1 -All
 ```
 
 `-All` 会编译 helper，并把 helper 嵌入两个 PyInstaller one-file 程序。
 只构建上传端时使用：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build_all.ps1 -Uploader
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\build_all.ps1 -Uploader
 ```
 
 上传端构建名固定为 `图纸上传助手.exe`。发布新版本时先更新 `VERSION` 和

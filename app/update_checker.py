@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from dataclasses import asdict, dataclass, fields
@@ -242,6 +243,9 @@ def download_update(
         raise UpdateError("当前版本已是最新，无需下载")
     if not info.download_url or not info.sha256:
         raise UpdateError("更新信息不完整，已阻止下载")
+    parsed_url = urllib.parse.urlparse(str(info.download_url))
+    if parsed_url.scheme.lower() != "https" or not parsed_url.netloc:
+        raise UpdateError("更新下载地址不安全：%s" % info.download_url)
     safe_name = (
         info.asset_name.lower()
         in {name.lower() for name in STABLE_ASSET_NAMES}
@@ -380,6 +384,23 @@ def _clean_pyinstaller_environment() -> dict[str, str]:
     return environment
 
 
+def _replace_with_retry(
+    src: Path,
+    dst: Path,
+    *,
+    sleep: Callable = time.sleep,
+) -> None:
+    # The PyInstaller bootloader can still hold the EXE after the GUI exits.
+    for attempt in range(16):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError as exc:
+            if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 15:
+                raise
+            sleep(0.2)
+
+
 def apply_update(
     old_path: str | os.PathLike,
     parent_pid: int,
@@ -399,6 +420,7 @@ def apply_update(
         raise UpdateError("更新源文件不存在：%s" % source)
     old.parent.mkdir(parents=True, exist_ok=True)
 
+    source_sha = _sha256_file(source)
     backup = _unique_backup_path(old) if old.exists() else None
     temporary = old.with_name(
         ".%s.update-%s.tmp" % (old.name, os.getpid())
@@ -408,23 +430,17 @@ def apply_update(
         shutil.copy2(source, temporary)
         with temporary.open("rb+") as handle:
             os.fsync(handle.fileno())
-        if _sha256_file(temporary) != _sha256_file(source):
+        if _sha256_file(temporary) != source_sha:
             raise UpdateError("待安装 EXE 校验失败")
         if backup is not None:
             shutil.copy2(old, backup)
+            with backup.open("rb+") as handle:
+                os.fsync(handle.fileno())
             if _sha256_file(backup) != _sha256_file(old):
                 raise UpdateError("旧 EXE 备份校验失败")
-        # The PyInstaller bootloader can still hold the EXE after the GUI exits.
-        for attempt in range(16):
-            try:
-                os.replace(temporary, old)
-                break
-            except OSError as exc:
-                if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 15:
-                    raise
-                sleep(0.2)
+        _replace_with_retry(temporary, old, sleep=sleep)
         replaced = True
-        if _sha256_file(old) != _sha256_file(source):
+        if _sha256_file(old) != source_sha:
             raise UpdateError("覆盖后的 EXE 校验失败")
         process = launch_update(old, popen=popen, sleep=sleep)
     except Exception as exc:
@@ -434,7 +450,7 @@ def apply_update(
             pass
         if replaced and backup is not None:
             try:
-                os.replace(backup, old)
+                _replace_with_retry(backup, old, sleep=sleep)
             except OSError as rollback_error:
                 raise UpdateError(
                     "新版启动或覆盖失败：%s；无法恢复旧版本：%s；旧版备份：%s"

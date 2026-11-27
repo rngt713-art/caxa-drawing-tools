@@ -300,6 +300,11 @@ class RecoveryVerifier:
         }
 
     def verify_relation(self, row: dict) -> dict:
+        if str(row.get("phase") or "") == "relation_unlink_uncertain":
+            raise RecoveryEvidenceError(
+                "撤回借用操作待人工核实：请先在 CAXA 中确认该借用关系是否已删除；"
+                "若仍在树中请选“确认未写入”"
+            )
         parent = drawing_bundle.normalize_code(row.get("parent_code"))
         child = drawing_bundle.normalize_code(row.get("child_code"))
         link_type = str(row.get("link_type") or "").strip()

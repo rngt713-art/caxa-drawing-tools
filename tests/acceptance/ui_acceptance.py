@@ -696,4 +696,36 @@ class UIAcceptance(unittest.TestCase):
         self.assertTrue(rel['link_only'])
         frozen=ui.ui_logic.snapshot_manifest(a.bundle)
         self.assertTrue(frozen['relations'][0]['link_only'])
+    def test_context_menu_offers_batch_borrow_undo_only_for_batch_created_borrow(self):
+        a=self.app
+        machine_path=Path(self.tmp.name)/'03.HW.001 整机.pdf'; machine_path.write_bytes(b'PDF-M')
+        batch_borrow=Path(self.tmp.name)/'04.001 本批借用.pdf'; batch_borrow.write_bytes(b'PDF-B')
+        existing_borrow=Path(self.tmp.name)/'04.002 已有借用.pdf'; existing_borrow.write_bytes(b'PDF-E')
+        own_parent=Path(self.tmp.name)/'01.01 父件.pdf'; own_parent.write_bytes(b'PDF-P')
+        own_child=Path(self.tmp.name)/'01.01-01 归属.pdf'; own_child.write_bytes(b'PDF-C')
+        a.add_pdfs([str(machine_path),str(batch_borrow),str(existing_borrow),str(own_parent),str(own_child)])
+        a._add_relation('03.HW.001','04.001',link_type='borrow',manual_override=True)
+        a._add_relation('03.HW.001','04.002',link_type='borrow',manual_override=True)
+        for rel in a.relations:
+            if rel['child_code']=='04.001':
+                rel.update(created_by_batch=True,link_status='已借用',parent_id=100,child_id=200,link_id=5001,link_class_id=1037,workflow_locked=False)
+            elif rel['child_code']=='04.002':
+                rel.update(created_by_batch=False,link_status='已存在')
+            elif rel['child_code']=='01.01-01':
+                rel.update(created_by_batch=False,link_status='已归属')
+        a.refresh_tree()
+        class FakeMenu:
+            def __init__(self,*args,**kwargs): self.labels=[]
+            def add_command(self,label,command): self.labels.append(label)
+            def add_separator(self): self.labels.append('---')
+            def tk_popup(self,*args): pass
+        by_child={rel['child_code']:iid for iid,rel in a._tree_relations.items() if rel}
+        for child_code, expected in (('04.001',True),('04.002',False),('01.01-01',False)):
+            fake=FakeMenu()
+            with patch.object(ui.tk,'Menu',return_value=fake),patch.object(a.tree,'identify_row',return_value=by_child[child_code]):
+                a._show_row_menu(SimpleNamespace(y=10,x_root=1,y_root=1))
+            if expected:
+                self.assertIn('撤回 CAXA 借用（仅限本批）…',fake.labels)
+            else:
+                self.assertNotIn('撤回 CAXA 借用（仅限本批）…',fake.labels)
 if __name__=='__main__':unittest.main(verbosity=2)

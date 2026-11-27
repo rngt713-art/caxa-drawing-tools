@@ -22,6 +22,7 @@ import os
 import platform
 import sqlite3
 import threading
+import time
 
 TASK_RUNNING = "进行中"
 TASK_DONE = "已完成"
@@ -34,6 +35,7 @@ OP_OK = "已确认成功"
 OP_FAILED = "失败"
 OP_PENDING = "待核实"
 OP_SKIPPED = "已跳过"
+OP_UNLINKED = "已解除"
 
 #: An orphan "running" row is as uncertain as an explicit pending row.
 PENDING_STATUSES = (OP_PENDING, OP_RUNNING)
@@ -133,6 +135,9 @@ def current_device_id() -> str:
     return "DEV-" + digest[:20].upper()
 
 
+_STALE_EMPTY_LOCK_SECONDS = 5.0
+
+
 def _pid_alive(pid: int) -> bool:
     """Best-effort liveness check for a lock holder."""
     if pid <= 0:
@@ -140,18 +145,67 @@ def _pid_alive(pid: int) -> bool:
     try:
         if os.name == "nt":
             import ctypes
+            from ctypes import wintypes
 
-            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [
+                wintypes.DWORD,
+                wintypes.BOOL,
+                wintypes.DWORD,
+            ]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.GetExitCodeProcess.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+
+            handle = kernel32.OpenProcess(0x1000, False, int(pid))
             if not handle:
                 return False
-            code = ctypes.c_ulong()
-            ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return bool(ok) and code.value == 259  # STILL_ACTIVE
+            try:
+                code = wintypes.DWORD()
+                ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+                return bool(ok) and code.value == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
         os.kill(pid, 0)
         return True
     except Exception:
         return False
+
+
+def _is_stale_lock(path: str) -> bool:
+    holder = 0
+    try:
+        with open(path, "r", encoding="utf-8") as existing:
+            holder = int((existing.read() or "0").strip() or 0)
+    except (OSError, ValueError):
+        holder = 0
+    if holder > 0:
+        return not _pid_alive(holder)
+    try:
+        age = time.time() - os.path.getmtime(path)
+    except OSError:
+        return False
+    return age >= _STALE_EMPTY_LOCK_SECONDS
+
+
+def _try_remove_stale_lock(path: str) -> bool:
+    if not _is_stale_lock(path):
+        return False
+    stale_name = "%s.stale-%d-%s" % (path, os.getpid(), os.urandom(3).hex())
+    try:
+        os.replace(path, stale_name)
+    except OSError:
+        return False
+    try:
+        os.remove(stale_name)
+    except OSError:
+        pass
+    return True
 
 
 class TaskJournal:
@@ -220,18 +274,9 @@ class TaskJournal:
                 break
             except FileExistsError:
                 # A crashed process leaves a lock behind; clear it only when the
-                # recorded pid is provably gone.
-                holder = 0
-                try:
-                    with open(path, "r", encoding="utf-8") as existing:
-                        holder = int((existing.read() or "0").strip() or 0)
-                except (OSError, ValueError):
-                    holder = 0
-                if attempt == 0 and holder and not _pid_alive(holder):
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
+                # recorded pid is provably gone (or an empty lock has aged out).
+                if attempt == 0 and _is_stale_lock(path):
+                    _try_remove_stale_lock(path)
                     continue
                 raise JournalBusy("任务 %s 正在本机另一进程执行" % key)
         if handle is None:
@@ -271,18 +316,8 @@ class TaskJournal:
             if not name.endswith(".lock"):
                 continue
             path = os.path.join(directory, name)
-            holder = 0
-            try:
-                with open(path, "r", encoding="utf-8") as handle:
-                    holder = int((handle.read() or "0").strip() or 0)
-            except (OSError, ValueError):
-                holder = 0
-            if holder and not _pid_alive(holder):
-                try:
-                    os.remove(path)
-                    removed += 1
-                except OSError:
-                    pass
+            if _is_stale_lock(path) and _try_remove_stale_lock(path):
+                removed += 1
         return removed
 
     # -- tasks -----------------------------------------------------------

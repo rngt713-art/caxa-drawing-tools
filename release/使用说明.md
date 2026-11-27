@@ -12,7 +12,7 @@
 
 ## 使用
 
-1. 双击从 GitHub Releases 下载的 `CAXA-Drawing-Uploader.exe`。首次使用请填写 CAXA 服务器地址。
+1. 双击从 GitHub Releases 下载的 `图纸上传助手.exe`。首次使用请填写 CAXA 服务器地址。
 2. 二选一准备图纸：
    - 打开识别助手导出的上传包；
    - 或由同事自己拆分、重命名后，直接把 PDF 拖入窗口。
@@ -190,7 +190,7 @@ CAXA 导入和重复图号弹窗由上传助手自己的 helper 在本次登录�
 ## 构建（工作设备）
 
 ```
-powershell -ExecutionPolicy Bypass -File ..\build_all.ps1 -All
+pwsh -NoProfile -ExecutionPolicy Bypass -File ..\build_all.ps1 -All
 ```
 
 helper 需 CAXA 2011 引用 DLL，本机会明确报缺依赖；不要用旧 exe 充当新版本。

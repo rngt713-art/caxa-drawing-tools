@@ -1,4 +1,4 @@
-# 图纸上传/识别两个入口的 Windows 构建脚本（在工作设备上运行）
+﻿# 图纸上传/识别两个入口的 Windows 构建脚本（在工作设备上运行）
 #
 # 用法示例（在工作设备、已安装 CAXA 2011 客户端与 Python 依赖后）：
 #   pwsh -NoProfile -ExecutionPolicy Bypass -File .\build_all.ps1 -All
@@ -10,7 +10,7 @@
 # - Helper（caxa_helper.exe）必须引用现场 CAXA 2011 的 DLL，只有工作设备能编译；
 #   本脚本检测不到 DLL 时会明确失败，不会拿旧 exe 冒充新版本。
 # - 上传端（upload_main.py）与识别端（recognize_main.py）分别用 PyInstaller 打包，
-#   输出目录默认为 dist\uploader 与 dist\recognizer。
+#   默认输出目录为 dist\，产物名为 图纸上传助手.exe 与 图纸识别助手.exe。
 # - 本脚本不访问网络、不启动 CAXA、不探测服务器。
 
 [CmdletBinding()]

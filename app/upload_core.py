@@ -48,6 +48,96 @@ ITEM_SKIPPED = "已跳过"
 
 WORKFLOW_STARTED = "已发起"
 WORKFLOW_PENDING = "待核实"
+
+
+def _safe_json_dict(raw) -> dict:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _relation_record_payload(row: dict, status: str) -> tuple[str, str, str]:
+    default_detail = str(row.get("note") or status)
+    if status == "已借用" and row.get("created_by_batch"):
+        try:
+            parent_id = int(row.get("parent_id") or 0)
+            child_id = int(row.get("child_id") or 0)
+            link_id = int(row.get("link_id") or 0)
+            link_class_id = int(row.get("link_class_id") or 1037)
+        except (TypeError, ValueError):
+            parent_id = child_id = link_id = link_class_id = 0
+        if parent_id > 0 and child_id > 0 and link_id > 0 and link_class_id > 0:
+            payload = {
+                "note": default_detail,
+                "created_by_batch": True,
+                "parent_id": parent_id,
+                "child_id": child_id,
+                "link_id": link_id,
+                "link_class_id": link_class_id,
+                "reference": True,
+            }
+            return json.dumps(payload, ensure_ascii=False), str(link_id), str(link_class_id)
+    return default_detail, "", ""
+
+
+def _apply_batch_borrow_metadata(rel: dict, row: dict, task_id: str) -> None:
+    if row.get("status") == "已借用" and row.get("created_by_batch"):
+        try:
+            parent_id = int(row.get("parent_id") or 0)
+            child_id = int(row.get("child_id") or 0)
+            link_id = int(row.get("link_id") or 0)
+            link_class_id = int(row.get("link_class_id") or 1037)
+        except (TypeError, ValueError):
+            parent_id = child_id = link_id = link_class_id = 0
+        if parent_id > 0 and child_id > 0 and link_id > 0 and link_class_id > 0:
+            rel["created_by_batch"] = True
+            rel["batch_task_id"] = str(task_id)
+            rel["parent_id"] = parent_id
+            rel["child_id"] = child_id
+            rel["link_id"] = link_id
+            rel["link_class_id"] = link_class_id
+            rel["workflow_locked"] = False
+            return
+    if row.get("status") != "已借用":
+        rel["created_by_batch"] = False
+
+
+def _hydrate_relation_from_record(rel: dict, record: dict | None, task_id: str) -> dict | None:
+    if not record or record.get("status") != journal_module.OP_OK:
+        return None
+    if str(record.get("link_type") or "") != "borrow":
+        return None
+    payload = _safe_json_dict(record.get("detail"))
+    if not payload.get("created_by_batch"):
+        return None
+    try:
+        parent_id = int(payload.get("parent_id") or 0)
+        child_id = int(payload.get("child_id") or 0)
+        link_id = int(payload.get("link_id") or record.get("remote_id") or 0)
+        link_class_id = int(payload.get("link_class_id") or record.get("class_id") or 1037)
+    except (TypeError, ValueError):
+        return None
+    if parent_id <= 0 or child_id <= 0 or link_id <= 0 or link_class_id <= 0:
+        return None
+    rel["created_by_batch"] = True
+    rel["batch_task_id"] = str(task_id)
+    rel["parent_id"] = parent_id
+    rel["child_id"] = child_id
+    rel["link_id"] = link_id
+    rel["link_class_id"] = link_class_id
+    rel.setdefault("workflow_locked", False)
+    return {
+        "created_by_batch": True,
+        "batch_task_id": str(task_id),
+        "parent_id": parent_id,
+        "child_id": child_id,
+        "link_id": link_id,
+        "link_class_id": link_class_id,
+    }
 WORKFLOW_BLOCKED = "已阻止"
 WORKFLOW_FAILED = "失败"
 
@@ -402,6 +492,7 @@ def half_product_target_state(uploader, machine: str) -> dict:
     product_link_count = 0
     own_link_count = 0
     own_parent_matches = False
+    query_error = ""
     if part is not None and product is not None:
         reader = getattr(uploader, "part_info", None)
         if callable(reader):
@@ -460,9 +551,10 @@ def half_product_target_state(uploader, machine: str) -> dict:
                         ) in own_parent_ids
                     )
                 )
-            except Exception:
+            except Exception as exc:
                 product_link_count = -1
                 own_link_count = -1
+                query_error = str(exc)
     part_will_create = (
         product is not None
         and not candidates
@@ -472,6 +564,8 @@ def half_product_target_state(uploader, machine: str) -> dict:
     blocked_reason = ""
     if product is None:
         blocked_reason = "产品「02 半成品」不存在"
+    elif query_error:
+        blocked_reason = "读取半成品零件关系失败：%s" % query_error
     elif len(candidates) > 1:
         blocked_reason = "目标半成品存在多个原件"
     elif len(parent_candidates) > 1:
@@ -966,6 +1060,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
     journal = journal or journal_module.TaskJournal(journal_path)
     bridge = None
     uploader = None
+    staging = None
     task = None
     lock = None
     content_lock = None
@@ -1103,7 +1198,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
 
         def record_attach_attempt(code, baseline):
             row = journal.get_operation(task_id, "upload", code)
-            detail = json.loads(row["detail"])
+            detail = _safe_json_dict(row["detail"] if row is not None else "")
             detail["attach_attempt"] = baseline
             journal.record_operation(
                 task_id, "upload", code, status=journal_module.OP_RUNNING,
@@ -1123,11 +1218,12 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                 account["user"],
                 account["password"],
             )
+            staging = staging_module.TaskStaging(task_id, root=staging_root, log=log)
             uploader = CaxaUploader(
                 bridge,
                 log=log,
                 on_duplicate=on_duplicate,
-                staging_dir=staging_module.TaskStaging(task_id, root=staging_root, log=log),
+                staging_dir=staging,
                 auto_confirm=auto_confirm,
                 before_attach=record_attach_attempt,
             )
@@ -1524,7 +1620,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                     uncertain.append(item)
                     pending_upload_codes.add(code)
                     operation = journal.get_operation(task_id, "upload", code)
-                    attempt = json.loads(operation["detail"])
+                    attempt = _safe_json_dict(operation["detail"] if operation is not None else "")
                     attempt.update(partial=partial, stage=stage, result=error_result)
                     journal.record_operation(
                         task_id, "upload", code, status=journal_module.OP_PENDING,
@@ -1562,6 +1658,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
             record = confirmed_relations.get(key_tuple)
             if record and str(record.get("link_type") or "") == link_type:
                 rel["link_status"] = "已存在"
+                _hydrate_relation_from_record(rel, record, task_id)
                 continue
             if str(rel.get("link_status") or "") in relations_module.PENDING_STATUSES:
                 relation_pending += 1
@@ -1648,12 +1745,17 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
             relation_rows.append(row)
             rel["link_status"] = row["status"]
             rel["note"] = row.get("note") or ""
+            _apply_batch_borrow_metadata(rel, row, task_id)
             relation_executed += 1
             if row["status"] in ("已借用", "已归属", "已存在"):
+                detail_text, remote_id_val, class_id_val = _relation_record_payload(
+                    row, row["status"]
+                )
                 journal.record_operation(
                     task_id, "relation", key, status=journal_module.OP_OK,
                     phase="relation", parent_code=parent, child_code=child,
-                    link_type=link_type, detail=row.get("note") or row["status"],
+                    link_type=link_type, remote_id=remote_id_val,
+                    class_id=class_id_val, detail=detail_text,
                 )
             elif row["status"] == "待核实":
                 relation_pending += 1
@@ -1693,7 +1795,7 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
             items_by_code = {drawing_bundle.normalize_code(item.get("code")): item
                              for item in items}
 
-            def save_relation_result(rel, status, note, phase):
+            def save_relation_result(rel, status, note, phase, *, result_row=None):
                 parent, child = relation_identity(rel)
                 row = rows_by_pair.get((parent, child))
                 if row is None:
@@ -1701,17 +1803,28 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                            "link_type": rel["link_type"]}
                     relation_rows.append(row)
                     rows_by_pair[(parent, child)] = row
+                if result_row:
+                    _apply_batch_borrow_metadata(rel, result_row, task_id)
+                    for field in ("created_by_batch", "parent_id", "child_id", "link_id", "link_class_id"):
+                        if field in result_row:
+                            row[field] = result_row[field]
                 row.update(status=status, note=note)
                 rel.update(link_status=status, note=note)
                 state = (journal_module.OP_OK
                          if status in ("已借用", "已归属", "已存在")
                          else journal_module.OP_PENDING if status == "待核实"
                          else journal_module.OP_FAILED)
+                detail_text, remote_id_val, class_id_val = (
+                    _relation_record_payload({**row, "note": note}, status)
+                    if state == journal_module.OP_OK
+                    else ("", "", "")
+                )
                 journal.record_operation(
                     task_id, "relation", journal_module.relation_key(parent, child),
                     status=state, phase=phase, parent_code=parent,
                     child_code=child, link_type=rel["link_type"],
-                    detail=note if state == journal_module.OP_OK else "",
+                    remote_id=remote_id_val, class_id=class_id_val,
+                    detail=detail_text,
                     error=note if state != journal_module.OP_OK else "",
                 )
 
@@ -1749,8 +1862,13 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                     repair = {"status": "待核实" if getattr(exc, "uncertain", False)
                               else "失败", "note": str(exc)}
                 # Unexpected interruptions intentionally leave OP_RUNNING behind.
-                save_relation_result(rel, repair.get("status") or "失败",
-                                     repair.get("note") or "", "relation_final_repair")
+                save_relation_result(
+                    rel,
+                    repair.get("status") or "失败",
+                    repair.get("note") or "",
+                    "relation_final_repair",
+                    result_row=repair,
+                )
                 relation_executed += 1
                 log("最终回读补齐关系：%s ← %s（%s）"
                     % (parent, child, repair.get("status") or "失败"))
@@ -1972,6 +2090,13 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
         else:
             task_status = journal_module.TASK_FAILED
         journal.set_task_status(task_id, task_status, stage="finished")
+        workflow_locked = any(
+            record.get("status") in (journal_module.OP_OK, *journal_module.PENDING_STATUSES)
+            for record in journal.operations(task_id, "workflow")
+        )
+        if workflow_locked:
+            for rel in relations:
+                rel["workflow_locked"] = True
 
         duplicate = not todo and not relation_executed and not workflow_started_now
         if duplicate and not ok:
@@ -2039,6 +2164,11 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
         if uploader is not None:
             try:
                 uploader.close()
+            except Exception:
+                pass
+        if staging is not None:
+            try:
+                staging.close()
             except Exception:
                 pass
         if bridge is not None:
@@ -2469,11 +2599,13 @@ def apply_manual_borrows(manifest: dict, account: dict, log=print,
             key = journal_module.relation_key(parent, child)
             record = confirmed.get(key_tuple)
             if record and str(record.get("link_type") or "") == link_type:
+                hydrated = _hydrate_relation_from_record(rel, record, task["task_id"])
                 rows.append(
                     {
                         "parent_code": parent, "child_code": child,
                         "link_type": link_type, "status": "已存在",
                         "note": "本任务已确认",
+                        **(hydrated or {}),
                     }
                 )
                 continue
@@ -2494,6 +2626,9 @@ def apply_manual_borrows(manifest: dict, account: dict, log=print,
             row["parent_code"] = parent
             row["child_code"] = child
             row["link_type"] = link_type
+            _apply_batch_borrow_metadata(rel, row, task["task_id"])
+            if row.get("created_by_batch"):
+                row["batch_task_id"] = task["task_id"]
             rows.append(row)
             rel["link_status"] = row["status"]
             rel["note"] = row.get("note") or ""
@@ -2508,11 +2643,22 @@ def apply_manual_borrows(manifest: dict, account: dict, log=print,
             else:
                 status = journal_module.OP_FAILED
                 failures += 1
+            if status == journal_module.OP_OK:
+                detail_text, remote_id_val, class_id_val = _relation_record_payload(
+                    row, row["status"]
+                )
+            else:
+                detail_text = row.get("note") or row["status"]
+                remote_id_val = ""
+                class_id_val = ""
             journal.record_operation(
                 task["task_id"], "relation", key, status=status, phase="relation",
                 parent_code=parent, child_code=child, link_type=link_type,
-                detail=row.get("note") or row["status"],
-                error=row.get("note") if status == journal_module.OP_FAILED else "",
+                remote_id=remote_id_val, class_id=class_id_val,
+                detail=detail_text,
+                error=(row.get("note") or "")
+                if status in (journal_module.OP_FAILED, journal_module.OP_PENDING)
+                else "",
             )
         journal.set_task_status(
             task["task_id"],
@@ -2532,6 +2678,19 @@ def apply_manual_borrows(manifest: dict, account: dict, log=print,
             "ok": not failures and not pending,
             "device_registration": device_registration or {},
         }
+    except Exception as exc:
+        if task is not None:
+            try:
+                if not journal.pending_operations(task["task_id"]):
+                    journal.set_task_status(
+                        task["task_id"],
+                        journal_module.TASK_FAILED,
+                        stage="error",
+                        note=str(exc),
+                    )
+            except Exception:
+                pass
+        raise
     finally:
         if lock is not None:
             try:
@@ -2545,6 +2704,267 @@ def apply_manual_borrows(manifest: dict, account: dict, log=print,
                 pass
         if uploader is not None:
             uploader.close()
+        if bridge is not None:
+            bridge.stop()
+        if owns_journal:
+            journal.close()
+
+
+def _task_has_workflow_lock(journal: journal_module.TaskJournal, task_id: str) -> bool:
+    return any(
+        record.get("status") in (journal_module.OP_OK, *journal_module.PENDING_STATUSES)
+        for record in journal.operations(task_id, "workflow")
+    )
+
+
+def batch_undoable_borrows(
+    manifest: dict,
+    account: dict,
+    *,
+    journal=None,
+    journal_path: str | None = None,
+) -> dict[tuple[str, str], dict]:
+    """Return batch-created borrow relations that belong to this batch and account."""
+    server = str(account.get("ip") or "")
+    port = int(account.get("port") or 0)
+    user = str(account.get("user") or "")
+    owns_journal = journal is None
+    journal = journal or journal_module.TaskJournal(journal_path)
+    try:
+        tasks_by_id: dict[str, dict] = {}
+        try:
+            digest = content_digest(manifest, account)
+        except Exception:
+            digest = ""
+        if digest:
+            for task in journal.tasks_for_digest(
+                digest=digest, server=server, port=port, user=user
+            ):
+                tasks_by_id[task["task_id"]] = task
+        for rel in (manifest or {}).get("relations") or ():
+            explicit_tid = str(rel.get("batch_task_id") or "").strip()
+            if not explicit_tid or explicit_tid in tasks_by_id:
+                continue
+            task = journal.get_task(explicit_tid)
+            if (
+                task is not None
+                and str(task.get("server") or "") == server
+                and int(task.get("port") or 0) == port
+                and str(task.get("login_user") or "") == user
+            ):
+                tasks_by_id[explicit_tid] = task
+
+        result: dict[tuple[str, str], dict] = {}
+        for task_id, task in tasks_by_id.items():
+            workflow_locked = _task_has_workflow_lock(journal, task_id)
+            for row in journal.operations(task_id, "relation"):
+                if row.get("status") != journal_module.OP_OK:
+                    continue
+                if str(row.get("link_type") or "") != "borrow":
+                    continue
+                payload = _safe_json_dict(row.get("detail"))
+                if not payload.get("created_by_batch"):
+                    continue
+                try:
+                    parent_id = int(payload.get("parent_id") or 0)
+                    child_id = int(payload.get("child_id") or 0)
+                    link_id = int(payload.get("link_id") or row.get("remote_id") or 0)
+                    link_class_id = int(
+                        payload.get("link_class_id") or row.get("class_id") or 1037
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if parent_id <= 0 or child_id <= 0 or link_id <= 0 or link_class_id <= 0:
+                    continue
+                parent = drawing_bundle.normalize_code(row.get("parent_code"))
+                child = drawing_bundle.normalize_code(row.get("child_code"))
+                if not parent or not child:
+                    continue
+                result.setdefault(
+                    (parent, child),
+                    {
+                        "task_id": task_id,
+                        "task_digest": str(task.get("digest") or ""),
+                        "parent_code": parent,
+                        "child_code": child,
+                        "parent_id": parent_id,
+                        "child_id": child_id,
+                        "link_id": link_id,
+                        "link_class_id": link_class_id,
+                        "workflow_locked": workflow_locked,
+                    },
+                )
+        return result
+    finally:
+        if owns_journal:
+            journal.close()
+
+
+def undo_batch_borrow(
+    manifest: dict,
+    account: dict,
+    parent_code: str,
+    child_code: str,
+    *,
+    task_id: str = "",
+    log=print,
+    journal=None,
+    journal_path: str | None = None,
+) -> dict:
+    """Undo a single borrow link newly created by this batch in CAXA."""
+    parent_code = drawing_bundle.normalize_code(parent_code)
+    child_code = drawing_bundle.normalize_code(child_code)
+    if not parent_code or not child_code:
+        raise CaxaError("父级或子级图号无效，无法撤回借用", stage="undo_borrow_guard")
+
+    owns_journal = journal is None
+    journal = journal or journal_module.TaskJournal(journal_path)
+    bridge = None
+    uploader = None
+    lock = None
+    content_lock = None
+    try:
+        try:
+            digest = content_digest(manifest, account)
+        except Exception:
+            digest = ""
+        if digest:
+            try:
+                content_lock = journal.run_lock(content_lock_key(digest, account))
+                content_lock.__enter__()
+            except journal_module.JournalBusy as exc:
+                raise PendingVerificationError(str(exc)) from exc
+
+        undoable = batch_undoable_borrows(manifest, account, journal=journal)
+        desc = undoable.get((parent_code, child_code))
+        if desc is None or (task_id and desc["task_id"] != task_id):
+            raise CaxaError(
+                "仅允许撤回本批新建的借用关系（历史已有借用与归属关系不可撤回）",
+                stage="undo_borrow_guard",
+            )
+        if desc.get("workflow_locked"):
+            raise CaxaError(
+                "本批已发起审核打印流程，为避免影响在审结构，已禁止撤回借用",
+                stage="undo_borrow_workflow_locked",
+            )
+
+        target_task_id = desc["task_id"]
+        try:
+            lock = journal.run_lock(target_task_id)
+            lock.__enter__()
+        except journal_module.JournalBusy as exc:
+            raise PendingVerificationError(str(exc)) from exc
+
+        pending = journal.pending_operations(target_task_id)
+        if pending:
+            raise _pending_error(pending)
+
+        bridge = CaxaBridge()
+        prepare_device_plm_com_registration(bridge, journal, log=log)
+        log("登录 CAXA：%s@%s:%s" % (account["user"], account["ip"], account["port"]))
+        bridge.login(
+            account["ip"],
+            int(account["port"]),
+            account["user"],
+            account["password"],
+        )
+        uploader = CaxaUploader(bridge, log=log)
+
+        key = journal_module.relation_key(parent_code, child_code)
+        parent_id = int(desc["parent_id"])
+        child_id = int(desc["child_id"])
+        link_id = int(desc["link_id"])
+        link_class_id = int(desc["link_class_id"])
+        try:
+            outcome = uploader.unlink_batch_borrow(
+                parent_code,
+                child_code,
+                parent_id=parent_id,
+                child_id=child_id,
+                link_id=link_id,
+                link_class_id=link_class_id,
+            )
+        except CaxaError as exc:
+            if getattr(exc, "uncertain", False):
+                detail_payload = {
+                    "note": str(exc),
+                    "created_by_batch": False,
+                    "unlink_uncertain": True,
+                    "parent_id": parent_id,
+                    "child_id": child_id,
+                    "link_id": link_id,
+                    "link_class_id": link_class_id,
+                }
+                journal.record_operation(
+                    target_task_id,
+                    "relation",
+                    key,
+                    status=journal_module.OP_PENDING,
+                    phase="relation_unlink_uncertain",
+                    parent_code=parent_code,
+                    child_code=child_code,
+                    link_type="borrow",
+                    remote_id=str(link_id),
+                    class_id=str(link_class_id),
+                    detail=json.dumps(detail_payload, ensure_ascii=False),
+                    error=str(exc),
+                )
+                journal.set_task_status(
+                    target_task_id,
+                    journal_module.TASK_PENDING,
+                    stage="relation_unlink_uncertain",
+                    note=str(exc),
+                )
+                raise PendingVerificationError(
+                    "撤回借用结果未确认，已进入待核实：%s ← %s（%s）"
+                    % (parent_code, child_code, exc)
+                ) from exc
+            raise
+
+        unlinked_payload = {
+            "note": outcome.get("note") or "已解除本批新建借用",
+            "created_by_batch": False,
+            "unlinked": True,
+            "parent_id": parent_id,
+            "child_id": child_id,
+            "unlinked_link_id": link_id,
+            "link_class_id": link_class_id,
+        }
+        journal.record_operation(
+            target_task_id,
+            "relation",
+            key,
+            status=journal_module.OP_UNLINKED,
+            phase="relation_unlinked",
+            parent_code=parent_code,
+            child_code=child_code,
+            link_type="borrow",
+            remote_id=str(link_id),
+            class_id=str(link_class_id),
+            detail=json.dumps(unlinked_payload, ensure_ascii=False),
+            error="",
+        )
+        return {
+            "ok": True,
+            "task_id": target_task_id,
+            **outcome,
+        }
+    finally:
+        if lock is not None:
+            try:
+                lock.__exit__(None, None, None)
+            except Exception:
+                pass
+        if content_lock is not None:
+            try:
+                content_lock.__exit__(None, None, None)
+            except Exception:
+                pass
+        if uploader is not None:
+            try:
+                uploader.close()
+            except Exception:
+                pass
         if bridge is not None:
             bridge.stop()
         if owns_journal:

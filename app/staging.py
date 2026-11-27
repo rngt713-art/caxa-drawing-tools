@@ -80,20 +80,26 @@ class TaskStaging:
 
     def __init__(self, task_id: str | None = None, root: str | None = None, log=print):
         self.task_id = task_id or new_task_id()
+        base_task_id = self.task_id
         self.root = root or default_root()
         self.log = log
         os.makedirs(self.root, exist_ok=True)
         # exist_ok=False guarantees exclusivity even if two tasks pick an id.
         for attempt in range(20):
-            candidate = os.path.join(self.root, self.task_id)
+            candidate_id = (
+                base_task_id
+                if attempt == 0
+                else "%s-%d" % (base_task_id, attempt + 1)
+            )
+            candidate = os.path.join(self.root, candidate_id)
             try:
                 os.makedirs(candidate, exist_ok=False)
+                self.task_id = candidate_id
                 self.directory = candidate
                 break
             except FileExistsError:
                 if attempt == 19:
                     raise StagingError("无法创建独占暂存目录: %s" % candidate)
-                self.task_id = "%s-%d" % (self.task_id, attempt + 2)
         self._staged: dict[str, StagedFile] = {}
 
     # -- staging ---------------------------------------------------------
@@ -114,45 +120,46 @@ class TaskStaging:
         target = os.path.join(self.directory, safe_name)
         temp_path = "%s.part-%s" % (target, uuid.uuid4().hex[:8])
 
-        # 1) copy + hash into a temp file; nothing approved yet
-        with open(source, "rb") as handle:
-            digest = hashlib.sha256()
-            size = 0
-            with open(temp_path, "wb") as out:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(chunk)
-                    size += len(chunk)
-                    out.write(chunk)
-            actual_hash = digest.hexdigest()
+        try:
+            # 1) copy + hash into a temp file; nothing approved yet
+            with open(source, "rb") as handle:
+                digest = hashlib.sha256()
+                size = 0
+                with open(temp_path, "wb") as out:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                        size += len(chunk)
+                        out.write(chunk)
+                actual_hash = digest.hexdigest()
 
-        # 2) verify the input BEFORE committing anything
-        expected_hash = str(item.get("sha256") or "").lower()
-        expected_size = item.get("size")
-        if expected_hash and actual_hash != expected_hash:
-            _remove_quiet(temp_path)
-            raise StagingError(
-                "文件内容与登记指纹不一致，拒绝上传: %s" % os.path.basename(source)
-            )
-        if expected_size is not None and int(expected_size) != size:
-            _remove_quiet(temp_path)
-            raise StagingError(
-                "文件大小与登记记录不一致，拒绝上传: %s" % os.path.basename(source)
-            )
-
-        # 3) collision check on the committed set only
-        existing = self._staged.get(key)
-        if existing is not None:
-            if existing.sha256 != actual_hash:
-                _remove_quiet(temp_path)
-                raise StagingConflict(
-                    "本次任务中已有同名但内容不同的文件：%s（请修改图号/名称后重试）"
-                    % safe_name
+            # 2) verify the input BEFORE committing anything
+            expected_hash = str(item.get("sha256") or "").lower()
+            expected_size = item.get("size")
+            if expected_hash and actual_hash != expected_hash:
+                raise StagingError(
+                    "文件内容与登记指纹不一致，拒绝上传: %s" % os.path.basename(source)
                 )
-            _remove_quiet(temp_path)
-            return existing
+            if expected_size is not None and int(expected_size) != size:
+                raise StagingError(
+                    "文件大小与登记记录不一致，拒绝上传: %s" % os.path.basename(source)
+                )
 
-        # 4) atomic commit of the verified bytes
-        os.replace(temp_path, target)
+            # 3) collision check on the committed set only
+            existing = self._staged.get(key)
+            if existing is not None:
+                if existing.sha256 != actual_hash:
+                    raise StagingConflict(
+                        "本次任务中已有同名但内容不同的文件：%s（请修改图号/名称后重试）"
+                        % safe_name
+                    )
+                _remove_quiet(temp_path)
+                return existing
+
+            # 4) atomic commit of the verified bytes
+            os.replace(temp_path, target)
+        except Exception:
+            _remove_quiet(temp_path)
+            raise
 
         staged = StagedFile(
             path=target,

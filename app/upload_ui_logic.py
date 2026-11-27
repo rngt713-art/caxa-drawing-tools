@@ -43,6 +43,7 @@ _RECOVERY_PHASE_LABELS = {
     "upload:create_part": "创建图纸所属零件",
     "relation": "建立归属或借用关系",
     "relation_final_verify": "核实归属或借用关系",
+    "relation_unlink_uncertain": "撤回借用结果确认",
     "workflow": "流程启动",
     "workflow:create": "流程启动",
     "create": "流程启动",
@@ -212,7 +213,20 @@ def apply_relation_result(relations: list[dict], result_manifest: dict) -> int:
         source = by_pair.get(key)
         if source is None:
             continue
-        for field in ("link_type", "link_status", "note", "manual_override", "auto_decided"):
+        for field in (
+            "link_type",
+            "link_status",
+            "note",
+            "manual_override",
+            "auto_decided",
+            "created_by_batch",
+            "batch_task_id",
+            "link_id",
+            "link_class_id",
+            "parent_id",
+            "child_id",
+            "workflow_locked",
+        ):
             if field in source:
                 relation[field] = source[field]
         merged += 1
@@ -643,3 +657,95 @@ def summary_message(result: dict) -> str:
     if len(failures) > 6:
         lines.append("  · 其余 %d 项见日志" % (len(failures) - 6))
     return "\n".join(lines)
+
+
+def is_batch_undoable_borrow(relation: dict | None) -> bool:
+    """True only when a relation is an unlocked borrow newly created by this batch."""
+    if not isinstance(relation, dict):
+        return False
+    if str(relation.get("link_type") or "") != "borrow":
+        return False
+    if not bool(relation.get("created_by_batch")):
+        return False
+    if str(relation.get("link_status") or "") not in ("已借用", "已存在"):
+        return False
+    if bool(relation.get("workflow_locked")):
+        return False
+    try:
+        link_id = int(relation.get("link_id") or 0)
+        parent_id = int(relation.get("parent_id") or 0)
+        child_id = int(relation.get("child_id") or 0)
+    except (TypeError, ValueError):
+        return False
+    return link_id > 0 and parent_id > 0 and child_id > 0
+
+
+def hydrate_batch_undoable_borrows(
+    relations: list[dict],
+    undoable: dict[tuple[str, str], dict],
+) -> int:
+    """Attach persisted batch borrow evidence onto matching plan relations."""
+    if not undoable:
+        return 0
+    hydrated = 0
+    for relation in relations or ():
+        parent = drawing_bundle.normalize_code(relation.get("parent_code"))
+        child = drawing_bundle.normalize_code(relation.get("child_code"))
+        if str(relation.get("link_type") or "") != "borrow":
+            continue
+        desc = undoable.get((parent, child))
+        if not desc:
+            continue
+        relation["created_by_batch"] = True
+        relation["batch_task_id"] = str(desc.get("task_id") or "")
+        relation["parent_id"] = int(desc.get("parent_id") or 0)
+        relation["child_id"] = int(desc.get("child_id") or 0)
+        relation["link_id"] = int(desc.get("link_id") or 0)
+        relation["link_class_id"] = int(desc.get("link_class_id") or 1037)
+        relation["workflow_locked"] = bool(desc.get("workflow_locked"))
+        if not str(relation.get("link_status") or "").strip():
+            relation["link_status"] = "已借用"
+        hydrated += 1
+    return hydrated
+
+
+def remove_unlinked_relation(
+    relations: list[dict],
+    manual_borrows: list[dict],
+    parent_code: str,
+    child_code: str,
+) -> dict:
+    """Remove an undone batch borrow relation from local plan lists."""
+    parent = drawing_bundle.normalize_code(parent_code)
+    child = drawing_bundle.normalize_code(child_code)
+    new_relations = [
+        relation
+        for relation in (relations or ())
+        if not (
+            drawing_bundle.normalize_code(relation.get("parent_code")) == parent
+            and drawing_bundle.normalize_code(relation.get("child_code")) == child
+            and str(relation.get("link_type") or "borrow") == "borrow"
+        )
+    ]
+    new_manual_borrows: list[dict] = []
+    for entry in manual_borrows or ():
+        entry_parent = drawing_bundle.normalize_code(
+            entry.get("parent_code") or entry.get("machine")
+        )
+        if entry_parent != parent:
+            new_manual_borrows.append(dict(entry))
+            continue
+        remaining_codes = [
+            code
+            for code in entry.get("codes") or ()
+            if drawing_bundle.normalize_code(code) != child
+        ]
+        if not remaining_codes:
+            continue
+        updated = dict(entry)
+        updated["codes"] = remaining_codes
+        new_manual_borrows.append(updated)
+    return {
+        "relations": new_relations,
+        "manual_borrows": new_manual_borrows,
+    }

@@ -61,7 +61,7 @@ class CaxaHelper
         return null;
     }
 
-    static JavaScriptSerializer _json = new JavaScriptSerializer();
+    static JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
     static EAPService _svc;
     static Dictionary<int, List<string>> _productFolderPathIndex;
     static List<object> _productFolderPathErrors;
@@ -1779,6 +1779,7 @@ class CaxaHelper
         int linkId = Convert.ToInt32(a["link_id"]);
         int parentId = Convert.ToInt32(a["parent_id"]);
         int childId = Convert.ToInt32(a["child_id"]);
+        bool requireReference = a.ContainsKey("require_reference") && Convert.ToBoolean(a["require_reference"]);
         IEAPPartEntity parent = _svc.GetPart(parentId);
         if (parent == null) return Err("parent part not found: " + parentId);
         parent.Refresh();
@@ -1795,6 +1796,10 @@ class CaxaHelper
         if (match == null)
         {
             return Err("part relation not found under parent: " + linkId);
+        }
+        if (requireReference && !match.Reference)
+        {
+            return Err("refusing to unlink non-borrow ownership relation: " + linkId);
         }
         var ids = new Dictionary<string, object>
         {
@@ -2437,33 +2442,39 @@ class CaxaHelper
             }
             bool run = query.Run();
             var items = new List<object>();
-            foreach (object raw in query.QueryResult.GetAllObjectBases() as System.Collections.IEnumerable)
+            var allObjs = query.QueryResult != null
+                ? query.QueryResult.GetAllObjectBases() as System.Collections.IEnumerable
+                : null;
+            if (allObjs != null)
             {
-                var obj = raw as CAXA.A5.EAP.CommonLibrary.Session.ObjectStore.ICaxObjectBase;
-                if (obj == null) continue;
-                var item = new Dictionary<string, object>
+                foreach (object raw in allObjs)
                 {
-                    { "object_id", obj.ObjectId },
-                    { "class_name", obj.ClassName }
-                };
-                foreach (string propertyName in propertyNames)
-                {
-                    try
+                    var obj = raw as CAXA.A5.EAP.CommonLibrary.Session.ObjectStore.ICaxObjectBase;
+                    if (obj == null) continue;
+                    var item = new Dictionary<string, object>
                     {
-                        item[propertyName] = obj.GetValueAsString(propertyName);
-                    }
-                    catch (Exception ex)
+                        { "object_id", obj.ObjectId },
+                        { "class_name", obj.ClassName }
+                    };
+                    foreach (string propertyName in propertyNames)
                     {
-                        item[propertyName] = "ERROR: " + ex.Message;
+                        try
+                        {
+                            item[propertyName] = obj.GetValueAsString(propertyName);
+                        }
+                        catch (Exception ex)
+                        {
+                            item[propertyName] = "ERROR: " + ex.Message;
+                        }
                     }
+                    items.Add(item);
+                    if (items.Count >= limit) break;
                 }
-                items.Add(item);
-                if (items.Count >= limit) break;
             }
             return Ok(new Dictionary<string, object>
             {
                 { "run", run },
-                { "count", query.QueryResult.Count },
+                { "count", query.QueryResult != null ? query.QueryResult.Count : 0 },
                 { "items", items }
             });
         }
@@ -2488,42 +2499,48 @@ class CaxaHelper
             query.QueryCondition.QueriedClassID = classId;
             bool run = query.Run();
             var items = new List<object>();
-            foreach (object raw in query.QueryResult.GetAllObjectBases() as System.Collections.IEnumerable)
+            var allLinks = query.QueryResult != null
+                ? query.QueryResult.GetAllObjectBases() as System.Collections.IEnumerable
+                : null;
+            if (allLinks != null)
             {
-                var link = raw as CAXA.A5.EAP.CommonLibrary.Session.ObjectStore.ICaxLinkObject;
-                if (link == null) continue;
-                var item = new Dictionary<string, object>
+                foreach (object raw in allLinks)
                 {
-                    { "link_class_id", link.RefLinkClass != null ? link.RefLinkClass.ClassId : 0 },
-                    { "link_object_id", link.ObjectId }
-                };
-                foreach (var pair in new[]
-                {
-                    new { Name = "roleA", Obj = link.RoleAObject },
-                    new { Name = "roleB", Obj = link.RoleBObject }
-                })
-                {
-                    if (pair.Obj == null)
+                    var link = raw as CAXA.A5.EAP.CommonLibrary.Session.ObjectStore.ICaxLinkObject;
+                    if (link == null) continue;
+                    var item = new Dictionary<string, object>
                     {
-                        item[pair.Name] = null;
-                        continue;
-                    }
-                    var endpoint = new Dictionary<string, object>
-                    {
-                        { "class_name", pair.Obj.ClassName },
-                        { "object_id", pair.Obj.ObjectId }
+                        { "link_class_id", link.RefLinkClass != null ? link.RefLinkClass.ClassId : 0 },
+                        { "link_object_id", link.ObjectId }
                     };
-                    try { endpoint["identity"] = pair.Obj.GetValueAsString("IdentityNo"); } catch { }
-                    try { endpoint["name"] = pair.Obj.GetValueAsString("name"); } catch { }
-                    item[pair.Name] = endpoint;
+                    foreach (var pair in new[]
+                    {
+                        new { Name = "roleA", Obj = link.RoleAObject },
+                        new { Name = "roleB", Obj = link.RoleBObject }
+                    })
+                    {
+                        if (pair.Obj == null)
+                        {
+                            item[pair.Name] = null;
+                            continue;
+                        }
+                        var endpoint = new Dictionary<string, object>
+                        {
+                            { "class_name", pair.Obj.ClassName },
+                            { "object_id", pair.Obj.ObjectId }
+                        };
+                        try { endpoint["identity"] = pair.Obj.GetValueAsString("IdentityNo"); } catch { }
+                        try { endpoint["name"] = pair.Obj.GetValueAsString("name"); } catch { }
+                        item[pair.Name] = endpoint;
+                    }
+                    items.Add(item);
+                    if (items.Count >= limit) break;
                 }
-                items.Add(item);
-                if (items.Count >= limit) break;
             }
             return Ok(new Dictionary<string, object>
             {
                 { "run", run },
-                { "count", query.QueryResult.Count },
+                { "count", query.QueryResult != null ? query.QueryResult.Count : 0 },
                 { "items", items }
             });
         }
@@ -2846,9 +2863,19 @@ class CaxaHelper
         bool inserted = false;
         try
         {
-            pt.Insert();
-            inserted = true;
+            bool ok = pt.Insert();
+            inserted = ok;
             int objectId = pt.ObjectID;
+            if (!ok || objectId <= 0)
+            {
+                var created = new Dictionary<string, object>();
+                if (objectId > 0) created["part"] = objectId;
+                return WriteError(
+                    !ok ? "create_part Insert returned false" : "create_part returned invalid object_id: " + objectId,
+                    inserted ? "create_part:after_insert" : "create_part:insert",
+                    created,
+                    objectId);
+            }
             return Ok(new Dictionary<string, object>
             {
                 { "object_id", objectId },
@@ -2902,7 +2929,7 @@ class CaxaHelper
         try
         {
             IEAPPartEntity after = _svc.GetPart(partId);
-            verified = (after != null ? after.MaterialNo : "").Trim();
+            verified = ((after != null ? after.MaterialNo : null) ?? "").Trim();
         }
         catch (Exception ex)
         {
@@ -2972,9 +2999,19 @@ class CaxaHelper
         int productId = 0;
         try
         {
-            prod.Insert();
-            productInserted = true;
+            bool ok = prod.Insert();
+            productInserted = ok;
             productId = prod.ObjectID;
+            if (!ok || productId <= 0)
+            {
+                var created = new Dictionary<string, object>();
+                if (productId > 0) created["product"] = productId;
+                return WriteError(
+                    !ok ? "create_product Insert returned false" : "create_product returned invalid object_id: " + productId,
+                    productInserted ? "create_product:after_insert" : "create_product:insert",
+                    created,
+                    productId);
+            }
         }
         catch (Exception ex)
         {
@@ -3503,6 +3540,7 @@ class CaxaHelper
     {
         var steps = new Dictionary<string, object>();
         diag["new_version_steps"] = steps;
+        string downloadTmp = null;
         try
         {
             try { diag["state_ext"] = dr.StateExt; } catch { }
@@ -3516,11 +3554,11 @@ class CaxaHelper
                 // 检出没给路径：尝试显式下载到临时目录
                 try
                 {
-                    string tmp = Path.Combine(Path.GetTempPath(), "caxa_uploader_" + Environment.TickCount);
-                    Directory.CreateDirectory(tmp);
-                    if (dr.DownLoadFile(tmp, false))
+                    downloadTmp = Path.Combine(Path.GetTempPath(), "caxa_uploader_" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(downloadTmp);
+                    if (dr.DownLoadFile(downloadTmp, false))
                     {
-                        string[] files = Directory.GetFiles(tmp);
+                        string[] files = Directory.GetFiles(downloadTmp);
                         if (files.Length == 1)
                         {
                             checkoutPath = files[0];
@@ -3582,6 +3620,13 @@ class CaxaHelper
         {
             steps["fatal"] = ex.Message;
             return null;
+        }
+        finally
+        {
+            if (!string.IsNullOrEmpty(downloadTmp))
+            {
+                try { Directory.Delete(downloadTmp, true); } catch { }
+            }
         }
     }
 
@@ -3792,6 +3837,7 @@ class CaxaHelper
     {
         if (_svc == null || !_svc.HasLogin) return Err("not logged in");
         int id = Convert.ToInt32(a["object_id"]);
+        short cls = a.ContainsKey("class_id") ? Convert.ToInt16(a["class_id"]) : (short)1002;
         string name = a.ContainsKey("name") ? Convert.ToString(a["name"]) : null;
         string drawNo = a.ContainsKey("draw_no") ? Convert.ToString(a["draw_no"]) : null;
         bool updated = false;
@@ -3801,7 +3847,7 @@ class CaxaHelper
             var session = engine != null ? engine.CurSession : null;
             if (session == null) return Err("session unavailable");
             var store = session.ObjectStore;
-            var obj = store.RetrieveObject((short)1002, id)
+            var obj = store.RetrieveObject(cls, id)
                       as CAXA.A5.EAP.CommonLibrary.Session.ObjectStore.ICaxObjectBase;
             if (obj == null) return Err("drawing object not found: " + id);
             var res = new Dictionary<string, object>();
@@ -3819,7 +3865,7 @@ class CaxaHelper
             updated = true;
             res["class"] = obj.ClassName;
             res["updated"] = true;
-            var after = _svc.GetDrawing((short)1002, id);
+            var after = _svc.GetDrawing(cls, id);
             if (after != null)
             {
                 try { after.Retrieve(); } catch { }
@@ -3833,6 +3879,9 @@ class CaxaHelper
                     StringComparison.OrdinalIgnoreCase))
             {
                 res["ok"] = false;
+                res["partial"] = true;
+                res["uncertain"] = true;
+                res["stage"] = "set_drawing:verify";
                 res["error"] = "set drawing name readback mismatch";
                 return res;
             }
@@ -3990,7 +4039,15 @@ class CaxaHelper
         {
             int classId = classIdByDocumentId[drawingId];
             IEAPDrawingEntity drawing = _svc.GetDrawing((short)classId, drawingId);
-            if (drawing == null) drawing = FindDrawingById(drawingId);
+            if (drawing == null)
+            {
+                drawing = FindDrawingById(drawingId);
+                if (drawing != null && drawing.ClassID > 0)
+                {
+                    classId = drawing.ClassID;
+                    classIdByDocumentId[drawingId] = classId;
+                }
+            }
             if (drawing == null)
                 return Err("document not found: class=" + classId + ", id=" + drawingId);
             var item = new Dictionary<string, object>
@@ -4377,6 +4434,7 @@ class CaxaHelper
             return Ok(new Dictionary<string, object>
             {
                 { "link", "part_part_existing" },
+                { "link_class_id", existingPartLink.ClassID },
                 { "link_id", existingPartLink.ObjectID },
                 { "reference", existingPartLink.Reference },
                 { "existing", true }
@@ -4403,6 +4461,7 @@ class CaxaHelper
                         return Ok(new Dictionary<string, object>
                         {
                             { "link", "part_part" },
+                            { "link_class_id", link2.ClassID },
                             { "link_id", link2.ObjectID },
                             { "reference", link2.Reference }
                         });
@@ -4421,6 +4480,7 @@ class CaxaHelper
                     return Ok(new Dictionary<string, object>
                     {
                         { "link", highError == null ? "part_part_after_null" : "part_part_after_exception" },
+                        { "link_class_id", recoveredLink.ClassID },
                         { "link_id", recoveredLink.ObjectID },
                         { "reference", recoveredLink.Reference },
                         { "recovered_after_exception", highError != null },
@@ -4454,6 +4514,7 @@ class CaxaHelper
             return Ok(new Dictionary<string, object>
             {
                 { "link", "part_part_low" },
+                { "link_class_id", (short)1037 },
                 { "link_id", newLink.ObjectId },
                 { "reference", reference },
                 { "quantity", quantity }
@@ -4486,89 +4547,112 @@ class CaxaHelper
             Console.OutputEncoding = new UTF8Encoding(false);
             Console.InputEncoding = new UTF8Encoding(false);
             string line;
-            while ((line = Console.ReadLine()) != null)
+            try
             {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                Dictionary<string, object> resp;
-                try
+                while ((line = Console.ReadLine()) != null)
                 {
-                    var req = _json.Deserialize<Dictionary<string, object>>(line);
-                    string cmd = Convert.ToString(req["cmd"]);
-                    switch (cmd)
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    Dictionary<string, object> resp;
+                    try
                     {
-                        case "login": resp = CmdLogin(req); break;
-                        case "ensure_plm_com_registered":
-                            resp = CmdEnsurePlmComRegistered(); break;
-                        case "logout": resp = CmdLogout(); break;
-                        case "dump_tree": resp = CmdDumpTree(req); break;
-                        case "find": resp = CmdFind(req); break;
-                        case "list_products": resp = CmdListProducts(req); break;
-                        case "product_root_parts":
-                            resp = CmdProductRootParts(req); break;
-                        case "dump_product": resp = CmdDumpProduct(req); break;
-                        case "dump_product_by_id":
-                            resp = CmdDumpProductById(req); break;
-                        case "find_product": resp = CmdFindProduct(req); break;
-                        case "find_product_folder": resp = CmdFindProductFolder(req); break;
-                        case "find_product_in_folder":
-                            resp = CmdFindProductInFolder(req); break;
-                        case "ensure_product_folder":
-                            resp = CmdEnsureProductFolder(req); break;
-                        case "link_product_to_folder":
-                            resp = CmdLinkProductToFolder(req); break;
-                        case "unlink_product_from_folder":
-                            resp = CmdUnlinkProductFromFolder(req); break;
-                        case "unlink_product_part":
-                            resp = CmdUnlinkProductPart(req); break;
-                        case "unlink_part_relation":
-                            resp = CmdUnlinkPartRelation(req); break;
-                        case "product_root_part": resp = CmdProductRootPart(req); break;
-                        case "find_part": resp = CmdFindPart(req); break;
-                        case "find_part_in_product": resp = CmdFindPartInProduct(req); break;
-                        case "query_parts": resp = CmdQueryParts(req); break;
-                        case "query_product": resp = CmdQueryProduct(req); break;
-                        case "find_product_by_part":
-                            resp = CmdFindProductByPart(req); break;
-                        case "product_folder_index":
-                            resp = CmdProductFolderIndex(); break;
-                        case "product_folder_paths":
-                            resp = CmdProductFolderPaths(req); break;
-                        case "query_objects": resp = CmdQueryObjects(req); break;
-                        case "query_links": resp = CmdQueryLinks(req); break;
-                        case "wf_dal_probe": resp = CmdWorkflowDalProbe(req); break;
-                        case "wf_connection_probe": resp = CmdWorkflowConnectionProbe(req); break;
-                        case "related_objects": resp = CmdRelatedObjects(req); break;
-                        case "class_info": resp = CmdClassInfo(req); break;
-                        case "class_attributes":
-                            resp = CmdClassAttributes(req); break;
-                        case "part_info": resp = CmdPartInfo(req); break;
-                        case "create_part": resp = CmdCreatePart(req); break;
-                        case "ensure_part_material_code":
-                            resp = CmdEnsurePartMaterialCode(req); break;
-                        case "create_product": resp = CmdCreateProduct(req); break;
-                        case "reference": resp = CmdReference(req); break;
-                        case "upload": resp = CmdUpload(req); break;
-                        case "new_release": resp = CmdNewRelease(req); break;
-                        case "release_drawing": resp = CmdRelease(req); break;
-                        case "workflow_info": resp = CmdWorkflowInfo(req); break;
-                        case "start_workflow": resp = CmdStartWorkflow(req); break;
-                        case "link_part": resp = CmdLinkPart(req); break;
-                        case "part_drawings": resp = CmdPartDrawings(req); break;
-                        case "drawing_history": resp = CmdDrawingHistory(req); break;
-                        case "set_drawing": resp = CmdSetDrawing(req); break;
-                        case "set_part": resp = CmdSetPart(req); break;
-                        case "delete_drawing": resp = CmdDeleteDrawing(req); break;
-                        case "dump_windows": resp = CmdDumpWindows(req); break;
-                        case "set_auto_confirm": resp = CmdSetAutoConfirm(req); break;
-                        default: resp = Err("unknown cmd: " + cmd); break;
+                        var req = _json.Deserialize<Dictionary<string, object>>(line);
+                        if (req == null || !req.ContainsKey("cmd") || req["cmd"] == null)
+                        {
+                            resp = Err("invalid request: missing cmd");
+                        }
+                        else
+                        {
+                            string cmd = Convert.ToString(req["cmd"]);
+                            switch (cmd)
+                            {
+                                case "login": resp = CmdLogin(req); break;
+                                case "ensure_plm_com_registered":
+                                    resp = CmdEnsurePlmComRegistered(); break;
+                                case "logout": resp = CmdLogout(); break;
+                                case "dump_tree": resp = CmdDumpTree(req); break;
+                                case "find": resp = CmdFind(req); break;
+                                case "list_products": resp = CmdListProducts(req); break;
+                                case "product_root_parts":
+                                    resp = CmdProductRootParts(req); break;
+                                case "dump_product": resp = CmdDumpProduct(req); break;
+                                case "dump_product_by_id":
+                                    resp = CmdDumpProductById(req); break;
+                                case "find_product": resp = CmdFindProduct(req); break;
+                                case "find_product_folder": resp = CmdFindProductFolder(req); break;
+                                case "find_product_in_folder":
+                                    resp = CmdFindProductInFolder(req); break;
+                                case "ensure_product_folder":
+                                    resp = CmdEnsureProductFolder(req); break;
+                                case "link_product_to_folder":
+                                    resp = CmdLinkProductToFolder(req); break;
+                                case "unlink_product_from_folder":
+                                    resp = CmdUnlinkProductFromFolder(req); break;
+                                case "unlink_product_part":
+                                    resp = CmdUnlinkProductPart(req); break;
+                                case "unlink_part_relation":
+                                    resp = CmdUnlinkPartRelation(req); break;
+                                case "product_root_part": resp = CmdProductRootPart(req); break;
+                                case "find_part": resp = CmdFindPart(req); break;
+                                case "find_part_in_product": resp = CmdFindPartInProduct(req); break;
+                                case "query_parts": resp = CmdQueryParts(req); break;
+                                case "query_product": resp = CmdQueryProduct(req); break;
+                                case "find_product_by_part":
+                                    resp = CmdFindProductByPart(req); break;
+                                case "product_folder_index":
+                                    resp = CmdProductFolderIndex(); break;
+                                case "product_folder_paths":
+                                    resp = CmdProductFolderPaths(req); break;
+                                case "query_objects": resp = CmdQueryObjects(req); break;
+                                case "query_links": resp = CmdQueryLinks(req); break;
+                                case "wf_dal_probe": resp = CmdWorkflowDalProbe(req); break;
+                                case "wf_connection_probe": resp = CmdWorkflowConnectionProbe(req); break;
+                                case "related_objects": resp = CmdRelatedObjects(req); break;
+                                case "class_info": resp = CmdClassInfo(req); break;
+                                case "class_attributes":
+                                    resp = CmdClassAttributes(req); break;
+                                case "part_info": resp = CmdPartInfo(req); break;
+                                case "create_part": resp = CmdCreatePart(req); break;
+                                case "ensure_part_material_code":
+                                    resp = CmdEnsurePartMaterialCode(req); break;
+                                case "create_product": resp = CmdCreateProduct(req); break;
+                                case "reference": resp = CmdReference(req); break;
+                                case "upload": resp = CmdUpload(req); break;
+                                case "new_release": resp = CmdNewRelease(req); break;
+                                case "release_drawing": resp = CmdRelease(req); break;
+                                case "workflow_info": resp = CmdWorkflowInfo(req); break;
+                                case "start_workflow": resp = CmdStartWorkflow(req); break;
+                                case "link_part": resp = CmdLinkPart(req); break;
+                                case "part_drawings": resp = CmdPartDrawings(req); break;
+                                case "drawing_history": resp = CmdDrawingHistory(req); break;
+                                case "set_drawing": resp = CmdSetDrawing(req); break;
+                                case "set_part": resp = CmdSetPart(req); break;
+                                case "delete_drawing": resp = CmdDeleteDrawing(req); break;
+                                case "dump_windows": resp = CmdDumpWindows(req); break;
+                                case "set_auto_confirm": resp = CmdSetAutoConfirm(req); break;
+                                default: resp = Err("unknown cmd: " + cmd); break;
+                            }
+                        }
                     }
+                    catch (Exception ex)
+                    {
+                        resp = Err(ex.Message);
+                    }
+                    string outJson;
+                    try
+                    {
+                        outJson = _json.Serialize(resp);
+                    }
+                    catch (Exception serEx)
+                    {
+                        outJson = _json.Serialize(Err("response serialization failed: " + serEx.Message));
+                    }
+                    Console.WriteLine(outJson);
+                    Console.Out.Flush();
                 }
-                catch (Exception ex)
-                {
-                    resp = Err(ex.Message);
-                }
-                Console.WriteLine(_json.Serialize(resp));
-                Console.Out.Flush();
+            }
+            finally
+            {
+                try { if (_svc != null && _svc.HasLogin) _svc.Logout(); } catch { }
             }
         }
         catch (Exception ex)
@@ -4591,7 +4675,7 @@ class CaxaHelper
     static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint Msg, IntPtr wParam,
                                              System.Text.StringBuilder lParam, uint fuFlags,
                                              uint uTimeout, out IntPtr lpdwResult);
-    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     static extern IntPtr SendMessageTimeoutPtr(IntPtr hWnd, uint Msg, IntPtr wParam,
                                                IntPtr lParam, uint fuFlags,
                                                uint uTimeout, out IntPtr lpdwResult);
@@ -4673,11 +4757,20 @@ class CaxaHelper
     static extern int GetDlgCtrlID(IntPtr hWnd);
     const uint BM_GETCHECK = 0x00F0;
 
+    static readonly object _autoLock = new object();
     static volatile bool _autoEnabled = false;
     static string _autoMode = "";
     static string _autoRequestId = "";
     static string _autoTargetName = "";
     static DateTime _autoDeadline = DateTime.MinValue;
+
+    static string GetAutoTargetName()
+    {
+        lock (_autoLock)
+        {
+            return _autoTargetName ?? "";
+        }
+    }
 
     static uint CurrentProcessId()
     {
@@ -4690,11 +4783,14 @@ class CaxaHelper
         bool enabled = a.ContainsKey("enabled") && Convert.ToBoolean(a["enabled"]);
         if (!enabled)
         {
-            _autoEnabled = false;
-            _autoMode = "";
-            _autoRequestId = "";
-            _autoTargetName = "";
-            _autoDeadline = DateTime.MinValue;
+            lock (_autoLock)
+            {
+                _autoEnabled = false;
+                _autoMode = "";
+                _autoRequestId = "";
+                _autoTargetName = "";
+                _autoDeadline = DateTime.MinValue;
+            }
             ConfirmLog("auto-confirm disabled");
             return Ok(new Dictionary<string, object> { { "enabled", false } });
         }
@@ -4705,22 +4801,27 @@ class CaxaHelper
             resp["stage"] = "auto_confirm";
             return resp;
         }
-        _autoMode = mode;
-        _autoRequestId = a.ContainsKey("request_id") ? Convert.ToString(a["request_id"]) : "";
-        _autoTargetName = a.ContainsKey("target_name")
+        string reqId = a.ContainsKey("request_id") ? Convert.ToString(a["request_id"]) : "";
+        string targetName = a.ContainsKey("target_name")
             ? Convert.ToString(a["target_name"]).Trim()
             : "";
-        _autoDeadline = DateTime.Now.AddSeconds(120);
-        _autoEnabled = true;
-        ConfirmLog("auto-confirm enable request=" + _autoRequestId
-                   + " target=" + _autoTargetName
+        lock (_autoLock)
+        {
+            _autoMode = mode;
+            _autoRequestId = reqId;
+            _autoTargetName = targetName;
+            _autoDeadline = DateTime.Now.AddSeconds(120);
+            _autoEnabled = true;
+        }
+        ConfirmLog("auto-confirm enable request=" + reqId
+                   + " target=" + targetName
                    + " pid=" + CurrentProcessId());
         return Ok(new Dictionary<string, object>
         {
             { "enabled", true },
-            { "mode", _autoMode },
-            { "request_id", _autoRequestId },
-            { "target_name", _autoTargetName },
+            { "mode", mode },
+            { "request_id", reqId },
+            { "target_name", targetName },
             { "process_id", CurrentProcessId() },
             { "dialog_fingerprint_scoped", true }
         });
@@ -4730,21 +4831,39 @@ class CaxaHelper
     {
         // 只允许本 helper 自己的窗口；2011 现场日志确认重复框 PID 与 helper
         // 相同。即使文本指纹一致，也绝不跨进程点击用户手动发起的对话框。
-        if (!_autoEnabled || !_uploadInProgress) return false;
-        if (DateTime.Now > _autoDeadline) return false;
-        if (_autoMode != "append_iteration") return false;
+        if (!_uploadInProgress) return false;
+        lock (_autoLock)
+        {
+            if (!_autoEnabled) return false;
+            if (DateTime.Now > _autoDeadline) return false;
+            if (_autoMode != "append_iteration") return false;
+        }
         return pid != 0 && pid == CurrentProcessId();
     }
 
     static string SafeWindowTitle(IntPtr hWnd)
     {
-        try
+        return SafeWindowText(hWnd, 300);
+    }
+
+    static IntPtr FindOwnedWindowByTitle(string title)
+    {
+        IntPtr found = IntPtr.Zero;
+        uint selfPid = CurrentProcessId();
+        if (selfPid == 0) return IntPtr.Zero;
+        EnumWindows(delegate(IntPtr h, IntPtr l)
         {
-            var tb = new System.Text.StringBuilder(300);
-            GetWindowTextW(hWnd, tb, 300);
-            return tb.ToString();
-        }
-        catch { return ""; }
+            uint pid;
+            GetWindowThreadProcessId(h, out pid);
+            if (pid != selfPid) return true;
+            if (string.Equals(SafeWindowTitle(h).Trim(), title, StringComparison.Ordinal))
+            {
+                found = h;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
     }
 
     // 按子控件文本找“对象已经存在提示框”；多处命中或进程不符时一律不点。
@@ -4754,6 +4873,7 @@ class CaxaHelper
         string texts = "";
         uint pid = 0;
         int matches = 0;
+        string targetName = GetAutoTargetName();
         EnumWindows(delegate(IntPtr h, IntPtr l)
         {
             if (SafeWindowTitle(h).Trim() != "对象已经存在提示框") return true;
@@ -4768,8 +4888,8 @@ class CaxaHelper
             if (!joined.Contains("在数据库中已经存在") ||
                 !joined.Contains("追加新的版次"))
                 return true;
-            if (!string.IsNullOrWhiteSpace(_autoTargetName) &&
-                !joined.Contains(_autoTargetName))
+            if (!string.IsNullOrWhiteSpace(targetName) &&
+                !joined.Contains(targetName))
                 return true;
             uint hpid;
             GetWindowThreadProcessId(h, out hpid);
@@ -4803,8 +4923,12 @@ class CaxaHelper
         string texts = "";
         uint pid = 0;
         int matches = 0;
+        uint selfPid = CurrentProcessId();
         EnumWindows(delegate(IntPtr h, IntPtr l)
         {
+            uint hpid;
+            GetWindowThreadProcessId(h, out hpid);
+            if (selfPid == 0 || hpid != selfPid) return true;
             if (SafeWindowTitle(h).Trim() != "提示框") return true;
             var parts = new List<string>();
             EnumChildWindows(h, delegate(IntPtr c, IntPtr l2)
@@ -4822,7 +4946,7 @@ class CaxaHelper
             {
                 found = h;
                 texts = joined;
-                GetWindowThreadProcessId(h, out pid);
+                pid = hpid;
             }
             return true;
         }, IntPtr.Zero);
@@ -4857,14 +4981,12 @@ class CaxaHelper
                 try
                 {
                     // 0) 删除确认框（仅助手自己发起删除时处理）
-                    IntPtr del = FindWindowW(null, "协同管理");
+                    IntPtr del = FindOwnedWindowByTitle("协同管理");
                     if (del != IntPtr.Zero && del != lastDel)
                     {
-                        lastDel = del;
-                        uint delPid;
-                        GetWindowThreadProcessId(del, out delPid);
-                        if (_deleteDialogAutoConfirm && delPid == CurrentProcessId())
+                        if (_deleteDialogAutoConfirm)
                         {
+                            lastDel = del;
                             ConfirmLog("发现删除确认框: " + DescribeChildren(del));
                             bool yes = ClickChildContaining(del, "是");
                             ConfirmLog("删除确认“是”点击=" + yes);
@@ -4879,9 +5001,9 @@ class CaxaHelper
                         out sameUserTexts, out sameUserPid);
                     if (sameUser != IntPtr.Zero && sameUser != lastSameUserLogin)
                     {
-                        lastSameUserLogin = sameUser;
                         if (_loginInProgress && sameUserPid == CurrentProcessId())
                         {
+                            lastSameUserLogin = sameUser;
                             bool okBtn = ClickDialogPrimaryButton(sameUser, "确定");
                             ConfirmLog("同一账号已登录提示框 控件=" + sameUserTexts
                                        + " 确定点击=" + okBtn);
@@ -4946,7 +5068,7 @@ class CaxaHelper
                     }
 
                     // 2) “导入文件确认对话框”：同样只在请求作用域内处理
-                    IntPtr dlg = FindWindowW(null, "导入文件确认对话框");
+                    IntPtr dlg = FindOwnedWindowByTitle("导入文件确认对话框");
                     if (dlg != IntPtr.Zero && dlg != lastImport)
                     {
                         uint dlgPid;
@@ -5092,11 +5214,10 @@ class CaxaHelper
         try
         {
             IntPtr res;
-            SendMessageTimeoutPtr(matches[0], BM_CLICK, IntPtr.Zero, IntPtr.Zero,
-                                  SMTO_ABORTIFHUNG, 500, out res);
+            return SendMessageTimeoutPtr(matches[0], BM_CLICK, IntPtr.Zero, IntPtr.Zero,
+                                         SMTO_ABORTIFHUNG, 500, out res) != IntPtr.Zero;
         }
         catch { return false; }
-        return true;
     }
 
     static string NormalizeControlText(string text)
@@ -5142,11 +5263,11 @@ class CaxaHelper
             try
             {
                 IntPtr res;
-                SendMessageTimeoutPtr(
+                if (SendMessageTimeoutPtr(
                     matches[0], BM_CLICK, IntPtr.Zero, IntPtr.Zero,
                     SMTO_ABORTIFHUNG, 1000, out res
-                );
-                return true;
+                ) != IntPtr.Zero)
+                    return true;
             }
             catch { }
         }
@@ -5157,11 +5278,11 @@ class CaxaHelper
             try
             {
                 IntPtr res;
-                SendMessageTimeoutPtr(
+                if (SendMessageTimeoutPtr(
                     defaultButton, BM_CLICK, IntPtr.Zero, IntPtr.Zero,
                     SMTO_ABORTIFHUNG, 1000, out res
-                );
-                return true;
+                ) != IntPtr.Zero)
+                    return true;
             }
             catch { }
         }
@@ -5174,12 +5295,13 @@ class CaxaHelper
         catch { return false; }
     }
 
-    // 找到子控件（文本包含指定片段）并点击，返回是否点中
+    // 找到按钮子控件（文本包含指定片段）并点击，返回是否点中
     static bool ClickChildContaining(IntPtr parent, string fragment)
     {
         IntPtr target = IntPtr.Zero;
         EnumChildWindows(parent, (h, l) =>
         {
+            if (!IsButtonControl(h)) return true;
             string s = SafeWindowText(h, 300);
             if (!string.IsNullOrEmpty(s) && s.Contains(fragment))
             {
@@ -5193,11 +5315,10 @@ class CaxaHelper
             try
             {
                 IntPtr res;
-                SendMessageTimeoutPtr(target, BM_CLICK, IntPtr.Zero, IntPtr.Zero,
-                                      SMTO_ABORTIFHUNG, 500, out res);
+                return SendMessageTimeoutPtr(target, BM_CLICK, IntPtr.Zero, IntPtr.Zero,
+                                             SMTO_ABORTIFHUNG, 500, out res) != IntPtr.Zero;
             }
-            catch { }
-            return true;
+            catch { return false; }
         }
         return false;
     }

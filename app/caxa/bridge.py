@@ -44,6 +44,7 @@ READ_COMMANDS = frozenset(
         "list_products",
         "part_drawings",
         "part_info",
+        "product_folder_index",
         "product_folder_paths",
         "product_root_parts",
         "product_root_part",
@@ -172,31 +173,67 @@ class CaxaBridge:
     def _alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
+    def _close_proc(self, proc, *, graceful_wait: float = 0.0):
+        if proc is None:
+            return
+        try:
+            stdin = getattr(proc, "stdin", None)
+            if stdin is not None:
+                stdin.close()
+        except Exception:
+            pass
+        try:
+            if graceful_wait > 0 and proc.poll() is None:
+                try:
+                    proc.wait(timeout=graceful_wait)
+                except Exception:
+                    pass
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=2.0)
+                except Exception:
+                    pass
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+        finally:
+            for stream in (getattr(proc, "stdout", None), getattr(proc, "stderr", None)):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+
     def _drop_process(self):
         proc = self._proc
         self._proc = None
         self._logged_in = False
-        if proc is not None:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
+        self._close_proc(proc, graceful_wait=0.0)
 
     def stop(self):
         with self._lock:
-            if self._proc is not None:
-                try:
-                    self._proc.stdin.write('{"cmd":"logout"}\n')
-                    self._proc.stdin.flush()
-                except Exception:
-                    pass
-                try:
-                    self._proc.terminate()
-                except Exception:
-                    pass
+            proc = self._proc
             self._proc = None
             self._logged_in = False
             self._login_params = None
+            if proc is not None:
+                try:
+                    if getattr(proc, "stdin", None) is not None:
+                        proc.stdin.write('{"cmd":"logout"}\n')
+                        proc.stdin.flush()
+                except Exception:
+                    pass
+                self._close_proc(proc, graceful_wait=2.0)
 
     # ---------- login ----------
     def login(
@@ -469,6 +506,29 @@ class CaxaBridge:
             "product_link": product_link,
             "quantity": quantity,
         })
+
+    def unlink_part_relation(
+        self,
+        parent_id: int,
+        child_id: int,
+        link_id: int,
+        link_class_id: int = 1037,
+        *,
+        require_reference: bool = True,
+        timeout: float = 120.0,
+    ) -> dict:
+        return self.call(
+            {
+                "cmd": "unlink_part_relation",
+                "parent_id": int(parent_id),
+                "child_id": int(child_id),
+                "link_id": int(link_id),
+                "link_class_id": int(link_class_id),
+                "require_reference": bool(require_reference),
+            },
+            timeout=timeout,
+            idempotent=False,
+        )
 
     def new_release(self, drawing_id: int) -> dict:
         return self.call({"cmd": "new_release", "drawing_id": drawing_id})

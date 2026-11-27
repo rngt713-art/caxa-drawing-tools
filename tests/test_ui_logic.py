@@ -325,5 +325,67 @@ class PrecheckItemMergeTests(unittest.TestCase):
         self.assertNotIn("status", items[0])
 
 
+class BatchBorrowUndoLogicTests(unittest.TestCase):
+    def test_undoable_gate_requires_batch_created_unlocked_borrow_with_ids(self):
+        base = {
+            "parent_code": "03.HW.001",
+            "child_code": "04.001",
+            "link_type": "borrow",
+            "link_status": "已借用",
+            "created_by_batch": True,
+            "parent_id": 10,
+            "child_id": 20,
+            "link_id": 30,
+            "link_class_id": 1037,
+            "workflow_locked": False,
+        }
+        self.assertTrue(upload_ui_logic.is_batch_undoable_borrow(base))
+        self.assertFalse(
+            upload_ui_logic.is_batch_undoable_borrow({**base, "link_type": "own"})
+        )
+        self.assertFalse(
+            upload_ui_logic.is_batch_undoable_borrow({**base, "created_by_batch": False})
+        )
+        self.assertFalse(
+            upload_ui_logic.is_batch_undoable_borrow({**base, "workflow_locked": True})
+        )
+        self.assertFalse(
+            upload_ui_logic.is_batch_undoable_borrow({**base, "link_id": 0})
+        )
+
+    def test_hydrate_and_remove_unlinked_relation(self):
+        relations = [
+            {"parent_code": "03.HW.001", "child_code": "04.001", "link_type": "borrow"},
+            {"parent_code": "01.01", "child_code": "01.01-01", "link_type": "own"},
+        ]
+        manual_borrows = [
+            {"machine": "03.HW.001", "codes": ["04.001", "04.002"]},
+        ]
+        count = upload_ui_logic.hydrate_batch_undoable_borrows(
+            relations,
+            {
+                ("03.HW.001", "04.001"): {
+                    "task_id": "T1",
+                    "parent_id": 10,
+                    "child_id": 20,
+                    "link_id": 30,
+                    "link_class_id": 1037,
+                    "workflow_locked": False,
+                }
+            },
+        )
+        self.assertEqual(count, 1)
+        self.assertTrue(upload_ui_logic.is_batch_undoable_borrow(relations[0]))
+        cleaned = upload_ui_logic.remove_unlinked_relation(
+            relations, manual_borrows, "03.HW.001", "04.001"
+        )
+        self.assertEqual(len(cleaned["relations"]), 1)
+        self.assertEqual(cleaned["relations"][0]["child_code"], "01.01-01")
+        self.assertEqual(
+            cleaned["manual_borrows"],
+            [{"machine": "03.HW.001", "codes": ["04.002"]}],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
