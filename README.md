@@ -28,8 +28,7 @@
 - `03.GPZ.*` 自动挂到 CAXA 既有目录 `GPZ钢瓶组`；历史特殊命名不再走通用的
   `GPZ系列`。
 - 同一界面清单使用稳定 `batch_id`，追加勾选或只处理部分行不会重传已确认项。
-- 2026-11-23 复审源码：224 项单元测试和 67 项离线验收通过，Windows EXE
-  已重建并通过启动检查。详见[验证记录](docs/VALIDATION_20261106.md)。
+- 主干最新离线回归：263 项单元测试和 71 项离线验收通过，helper 二进制已验证编译；工作机真机验收与后续发布状态详见[验证记录](docs/VALIDATION.md)。
 - 预检会识别 CAXA 中已有的原件 Part；归属计划自动改为借用，并提供
   “只升版 / 升版并借用”复选框。
 - 上传功能区提供独立“发起审核打印”按钮；它只补发已确认上传的流程，不重传 PDF。
@@ -48,7 +47,7 @@
 ```text
 app/                 Python/Tk 与 C# helper 源码
 tests/               离线回归与验收脚本
-docs/                架构、实现、抓包分析和真机验收清单
+docs/                按主题整理的业务、架构、CAXA 接口、构建测试文档与历史归档
 release/             发布说明与历史构建
 build_all.ps1        工作机构建脚本
 pack_source.ps1      源码交付包脚本
@@ -56,8 +55,8 @@ pack_source.ps1      源码交付包脚本
 
 ## 直接使用
 
-现场应先做小批验收。需要从源码重建时按下文运行 `build_all.ps1 -All`。验证范围见
-[本轮修复说明](docs/FIXES_AND_PERFORMANCE_20261113.md)。
+现场应先做小批验收。需要从源码重建时按下文运行 `build_all.ps1 -All`。构建与测试步骤见
+[构建与测试指南](docs/BUILD_AND_TEST.md)。
 
 1. 在工作机安装兼容的 CAXA 协同管理 2011 客户端。
 2. 从 GitHub Releases 下载并运行 `图纸上传助手.exe`。首次使用请填写 CAXA 服务器地址。
@@ -150,7 +149,9 @@ python tests\run_external_acceptance.py tests\acceptance\process_only_ui_accepta
   在本次登录或上传作用域内对当前目标自动确认。请通过上传助手界面或示例提交。
   遇到“待核实”，由操作员在上传助手核实。
 
-更完整的信息见 [实现说明](docs/IMPLEMENTATION.md)、
-[验证记录](docs/VALIDATION_20261106.md)、
-[真机测试清单](docs/review/CAXA图纸工具_真机测试与验证清单.md) 和
-[工作流抓包分析](docs/caxa_workflow_capture_analysis_20261105.md)。
+更完整的信息见 [文档索引](docs/README.md)、
+[业务规则](docs/BUSINESS_REQUIREMENTS.md)、
+[实现说明](docs/IMPLEMENTATION.md)、
+[CAXA 内部接口与抓包](docs/CAXA_INTERNALS.md)、
+[构建与真机测试](docs/BUILD_AND_TEST.md) 和
+[验证记录](docs/VALIDATION.md)。

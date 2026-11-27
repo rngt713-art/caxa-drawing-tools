@@ -3,7 +3,7 @@
 Before changing behavior, refactoring, or acting on an external review:
 
 1. Read `docs/BUSINESS_REQUIREMENTS.md`, `docs/HANDOFF.md`, and
-   `docs/IMPLEMENTATION.md`.
+   `docs/IMPLEMENTATION.md` (and `docs/CAXA_INTERNALS.md` when touching helper or CAXA SDK behavior).
 2. Treat user-confirmed business rules and deliberate compatibility fallbacks
    as requirements, not as bugs or cleanup opportunities.
 3. Keep low-level CAXA fallbacks where the business rules require them. In
@@ -15,6 +15,6 @@ Before changing behavior, refactoring, or acting on an external review:
 5. Add or update meaningful regression tests for persisted business rules.
 6. Whenever the user confirms a new requirement, exception, workaround, or
    observed behavior that affects validation, update
-   `docs/VALIDATION_20261106.md` in the same change with the date, requirement,
+   `docs/VALIDATION.md` in the same change with the date, requirement,
    implementation status, and validation evidence. Mark superseded historical
    values as historical instead of presenting them as current.
