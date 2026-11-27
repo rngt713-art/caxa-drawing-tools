@@ -65,6 +65,8 @@ class CaxaHelper
     static EAPService _svc;
     static Dictionary<int, List<string>> _productFolderPathIndex;
     static List<object> _productFolderPathErrors;
+    static List<object> _productFolderIndexRows;
+    static List<object> _productFolderIndexErrors;
 
     static Dictionary<string, object> Ok(object extra = null)
     {
@@ -653,6 +655,10 @@ class CaxaHelper
             failed["logged_in"] = false;
             return failed;
         }
+        _productFolderPathIndex = null;
+        _productFolderPathErrors = null;
+        _productFolderIndexRows = null;
+        _productFolderIndexErrors = null;
         try
         {
             var engine = CAXA.A5.EAP.CommonLibrary.EAPLibEngine.Instance;
@@ -679,6 +685,10 @@ class CaxaHelper
     static Dictionary<string, object> CmdLogout()
     {
         if (_svc != null && _svc.HasLogin) _svc.Logout();
+        _productFolderPathIndex = null;
+        _productFolderPathErrors = null;
+        _productFolderIndexRows = null;
+        _productFolderIndexErrors = null;
         return Ok();
     }
 
@@ -837,18 +847,7 @@ class CaxaHelper
     {
         if (_svc == null || !_svc.HasLogin) return Err("not logged in");
         int productId = Convert.ToInt32(a["product_id"]);
-        if (_productFolderPathIndex == null)
-        {
-            _productFolderPathIndex = new Dictionary<int, List<string>>();
-            _productFolderPathErrors = new List<object>();
-            foreach (var root in _svc.GetAllRootProductFolders() ??
-                     new IEAPProductFolderEntity[0])
-            {
-                IndexProductFolderPaths(
-                    root, "", _productFolderPathIndex,
-                    _productFolderPathErrors);
-            }
-        }
+        EnsureProductFolderPaths();
         List<string> paths;
         if (!_productFolderPathIndex.TryGetValue(productId, out paths))
             paths = new List<string>();
@@ -859,6 +858,32 @@ class CaxaHelper
             { "complete", _productFolderPathErrors.Count == 0 },
             { "errors", _productFolderPathErrors }
         });
+    }
+
+    static Dictionary<string, object> CmdProductFolderIndex()
+    {
+        if (_svc == null || !_svc.HasLogin) return Err("not logged in");
+        EnsureSeriesFolderIndex();
+        return Ok(new Dictionary<string, object>
+        {
+            { "items", _productFolderIndexRows },
+            { "complete", _productFolderIndexErrors.Count == 0 },
+            { "errors", _productFolderIndexErrors }
+        });
+    }
+
+    static void EnsureProductFolderPaths()
+    {
+        if (_productFolderPathIndex != null) return;
+        _productFolderPathIndex = new Dictionary<int, List<string>>();
+        _productFolderPathErrors = new List<object>();
+        foreach (var root in _svc.GetAllRootProductFolders() ??
+                 new IEAPProductFolderEntity[0])
+        {
+            IndexProductFolderPaths(
+                root, "", _productFolderPathIndex,
+                _productFolderPathErrors);
+        }
     }
 
     static void IndexProductFolderPaths(
@@ -904,6 +929,60 @@ class CaxaHelper
                      new IEAPProductFolderEntity[0])
             {
                 IndexProductFolderPaths(child, path, index, errors);
+            }
+        }
+        catch (Exception ex)
+        {
+            errors.Add(new Dictionary<string, object>
+            {
+                { "folder_path", path },
+                { "area", "children" },
+                { "detail", ex.Message }
+            });
+        }
+    }
+
+    static void EnsureSeriesFolderIndex()
+    {
+        if (_productFolderIndexRows != null) return;
+        _productFolderIndexRows = new List<object>();
+        _productFolderIndexErrors = new List<object>();
+        foreach (var root in _svc.GetAllRootProductFolders() ??
+                 new IEAPProductFolderEntity[0])
+        {
+            IndexSeriesFolder(
+                root, "", new List<string>(), _productFolderIndexRows,
+                _productFolderIndexErrors);
+        }
+    }
+
+    static void IndexSeriesFolder(
+        IEAPProductFolderEntity folder,
+        string parentPath,
+        List<string> parentNames,
+        List<object> rows,
+        List<object> errors)
+    {
+        if (folder == null) return;
+        string path = NormalizeProductFolderPath(parentPath + "/" + folder.Name);
+        var names = new List<string>(parentNames);
+        names.Add(Convert.ToString(folder.Name));
+        rows.Add(new Dictionary<string, object>
+        {
+            { "object_id", folder.ObjectID },
+            { "class_id", folder.ClassID },
+            { "identity", folder.IdentityNo },
+            { "name", folder.Name },
+            { "path", path },
+            { "path_parts", names.Cast<object>().ToList() },
+            { "depth", names.Count }
+        });
+        try
+        {
+            foreach (var child in folder.Children ??
+                     new IEAPProductFolderEntity[0])
+            {
+                IndexSeriesFolder(child, path, names, rows, errors);
             }
         }
         catch (Exception ex)
@@ -4450,6 +4529,8 @@ class CaxaHelper
                         case "query_product": resp = CmdQueryProduct(req); break;
                         case "find_product_by_part":
                             resp = CmdFindProductByPart(req); break;
+                        case "product_folder_index":
+                            resp = CmdProductFolderIndex(); break;
                         case "product_folder_paths":
                             resp = CmdProductFolderPaths(req); break;
                         case "query_objects": resp = CmdQueryObjects(req); break;

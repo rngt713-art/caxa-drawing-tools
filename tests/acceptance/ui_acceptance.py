@@ -182,6 +182,26 @@ class UIAcceptance(unittest.TestCase):
         a._toggle_upload(point)
         self.assertFalse(item['upgrade_only'])
         self.assertIn('☐',a.tree.item(iid,'values')[7])
+    def test_existing_own_relation_is_described_and_upgrades_only(self):
+        a=self.app
+        path=Path(self.tmp.name)/'01.01-01 child.pdf'
+        path.write_bytes(b'PDF-C')
+        a.add_pdfs([str(path)])
+        item=a.items[0]
+        item.update({
+            'existing_original':True,
+            'existing_original_part_id':501,
+            'existing_relation':True,
+            'existing_relation_type':'own',
+            'upgrade_only':True,
+        })
+        a.refresh_tree()
+        iid=next(
+            iid for iid,code in a._tree_codes.items()
+            if code=='01.01-01'
+        )
+        self.assertIn('已有归属关系',a.tree.item(iid,'values')[2])
+        self.assertEqual(a.tree.item(iid,'values')[7],'☑ 仅升版')
     def test_add_relation_dialog_is_centered(self):
         with patch.object(self.app,'_center_dialog_on_parent') as center:
             self.app.add_relation_dialog('01.01')
@@ -305,6 +325,50 @@ class UIAcceptance(unittest.TestCase):
             self.assertEqual(a.tree.parent(product_iid),group_iid)
             self.assertEqual(a.tree.parent(machine_iid),product_iid)
         self.assertNotIn('series_product_name',by_code['04.13.M3310-09'])
+    def test_process_machine_and_borrowed_component_share_hx_product_group(self):
+        a=self.app
+        process=Path(self.tmp.name)/'Z03.HX21.E20H-03L.pdf'
+        component=Path(self.tmp.name)/'04.13.HX21E20H-06 传动组件.pdf'
+        process.write_bytes(b'PDF-Z')
+        component.write_bytes(b'PDF-C')
+        a.add_pdfs([str(process)])
+        a.add_pdfs([str(component)],parent_code='03.HX21.E20H-03L')
+        groups={path:iid for iid,path in a._tree_product_groups.items()}
+        self.assertIn('HX系列',groups)
+        self.assertNotIn('HX21系列',groups)
+        product_iid=next(
+            iid for iid,code in a._tree_product_nodes.items()
+            if code=='03.HX21.E20H-03L'
+        )
+        process_iid=next(
+            iid for iid,code in a._tree_codes.items()
+            if code=='Z03.HX21.E20H-03L'
+        )
+        machine_iid=next(
+            iid for iid,code in a._tree_codes.items()
+            if code=='03.HX21.E20H-03L'
+        )
+        component_iid=next(
+            iid for iid,code in a._tree_codes.items()
+            if code=='04.13.HX21E20H-06'
+        )
+        self.assertEqual(a.tree.parent(product_iid),groups['HX系列'])
+        self.assertEqual(a.tree.parent(process_iid),product_iid)
+        self.assertEqual(a.tree.parent(machine_iid),product_iid)
+        self.assertEqual(a.tree.parent(component_iid),machine_iid)
+    def test_w6_requires_manual_series_selection(self):
+        a=self.app
+        machine=Path(self.tmp.name)/'03.W6.001 设计图.pdf'
+        machine.write_bytes(b'PDF-W6')
+        a.add_pdfs([str(machine)])
+        groups={path:iid for iid,path in a._tree_product_groups.items()}
+        self.assertIn('未指定系列',groups)
+        self.assertNotIn('W系列',groups)
+        a._apply_inline_series(groups['未指定系列'],'W6')
+        self.assertEqual(
+            a._item_by_code('03.W6.001')['series_product_folder'],
+            'W6',
+        )
     def test_ht_hgb_uses_nested_product_folder(self):
         a=self.app
         hgb=Path(self.tmp.name)/'03.HT.HGB.001 HGB压缩机.pdf'; hgb.write_bytes(b'PDF-HGB')

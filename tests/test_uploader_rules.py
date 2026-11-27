@@ -70,6 +70,8 @@ class RuleBridge:
                     for product_id in cmd.get("product_ids") or []
                 ],
             }
+        if name == "product_folder_index":
+            return {"ok": True, "items": [], "complete": True, "errors": []}
         if name == "find_product_folder":
             keyword = cmd.get("keyword")
             return {
@@ -859,6 +861,98 @@ class OwnBorrowTests(unittest.TestCase):
         self.assertEqual(part["object_id"], 44510)
         self.assertFalse(part["created_new_part"])
 
+    def test_series_folder_index_is_cached_and_matches_letter_aliases(self):
+        class SeriesFolderBridge(RuleBridge):
+            def __init__(self):
+                super().__init__()
+                self.index_calls = 0
+
+            def call(self, cmd, timeout=240.0, idempotent=None):
+                if cmd.get("cmd") == "product_folder_index":
+                    self.index_calls += 1
+                    return {
+                        "ok": True,
+                        "complete": True,
+                        "errors": [],
+                        "items": [
+                            {
+                                "path": "LSYZ两室一站",
+                                "path_parts": ["LSYZ两室一站"],
+                            },
+                            {
+                                "path": "GPZ钢瓶组",
+                                "path_parts": ["GPZ钢瓶组"],
+                            },
+                            {
+                                "path": "QT其他成品",
+                                "path_parts": ["QT其他成品"],
+                            },
+                            {
+                                "name": "NS",
+                                "path": "NS",
+                                "path_parts": ["NS"],
+                            },
+                            {
+                                "name": "NS防爆箱",
+                                "path": "NS防爆箱",
+                                "path_parts": ["NS防爆箱"],
+                            },
+                            {
+                                "path": "SFC防爆箱",
+                                "path_parts": ["SFC防爆箱"],
+                            },
+                            {
+                                "path": "SFD防爆箱",
+                                "path_parts": ["SFD防爆箱"],
+                            },
+                            {
+                                "path": "OW系列",
+                                "path_parts": ["OW系列"],
+                            },
+                            {
+                                "path": "HT合同特殊",
+                                "path_parts": ["HT合同特殊"],
+                            },
+                            {
+                                "path": "HT合同特殊/HGB系列",
+                                "path_parts": [
+                                    "HT合同特殊", "HGB系列",
+                                ],
+                            },
+                        ],
+                    }
+                return super().call(cmd, timeout, idempotent)
+
+        bridge = SeriesFolderBridge()
+        uploader = CaxaUploader(bridge)
+        expected = {
+            "03.LSYZ.001": "LSYZ两室一站",
+            "03.GPZ.L34040-T01": "GPZ钢瓶组",
+            "03.QT.001": "QT其他成品",
+            "03.NS.13.ETB20-01": "NS",
+            "03.SFC.001": "SFC防爆箱",
+            "03.SFD.001": "SFD防爆箱",
+            "03.OM.001": "OW系列",
+            "03.OV.001": "OW系列",
+            "03.OW.001": "OW系列",
+            "03.HT.HGB01-06350G": "HT合同特殊/HGB系列",
+        }
+        for machine, folder in expected.items():
+            resolved = uploader.resolve_series_product_folder(machine)
+            self.assertEqual(resolved["path"], folder)
+            self.assertEqual(resolved["source"], "caxa_index")
+        self.assertEqual(
+            uploader.resolve_series_product_folder(
+                "03.CFS.2NG-01", "NS防爆箱"
+            )["source"],
+            "manual",
+        )
+        self.assertEqual(
+            uploader.resolve_series_product_folder("03.W6.001")["path"],
+            "",
+        )
+        self.assertEqual(bridge.index_calls, 1)
+
     def test_partial_product_index_cannot_report_an_authoritative_miss(self):
         class PartialIndexBridge(RuleBridge):
             def call(self, cmd, timeout=240.0, idempotent=None):
@@ -1130,6 +1224,7 @@ class MachineAndClassTests(unittest.TestCase):
                 },
             }
             load_calls = 0
+            resolve_calls = 0
 
             def __init__(self, bridge, log=print, **kwargs):
                 self.bridge = bridge
@@ -1146,6 +1241,16 @@ class MachineAndClassTests(unittest.TestCase):
             def find_product_folder(self, name):
                 return {"object_id": 401, "identity": name, "path": name}
 
+            def resolve_series_product_folder(
+                self, machine, requested_folder=""
+            ):
+                type(self).resolve_calls += 1
+                product = self.products.get(str(machine).upper()) or {}
+                return {
+                    "path": product.get("folder_path") or requested_folder,
+                    "source": "caxa_index",
+                }
+
             def machine_part(self, product_id, identity):
                 return {"object_id": 700 + int(product_id)}
 
@@ -1159,6 +1264,7 @@ class MachineAndClassTests(unittest.TestCase):
                 return None
 
         NestedFolderPrecheckUploader.load_calls = 0
+        NestedFolderPrecheckUploader.resolve_calls = 0
         manifest = {
             "items": [
                 {
@@ -1191,12 +1297,13 @@ class MachineAndClassTests(unittest.TestCase):
                 ),
             )
         self.assertEqual(NestedFolderPrecheckUploader.load_calls, 0)
+        self.assertEqual(NestedFolderPrecheckUploader.resolve_calls, 2)
         rows = {row["code"]: row for row in info["machine_products"]}
         self.assertEqual(rows["03.HT.HGB05-05025B"]["folder"], "HT合同特殊/HGB系列")
         self.assertEqual(rows["03.HX21.E20H-03L"]["folder"], "HX系列")
         self.assertEqual(
             rows["03.HX21.E20H-03L"]["requested_folder"],
-            "HX21系列",
+            "HX系列",
         )
         self.assertEqual(rows["03.HX21.E20H-03L"]["product_name"], "HX21 2.0")
         self.assertEqual(manifest["items"][1]["series_product_folder"], "HX系列")

@@ -166,6 +166,19 @@ def find_machine_product(
     return uploader.find_product(machine)
 
 
+def resolve_series_product_folder(
+    uploader: CaxaUploader,
+    machine: str,
+    requested_folder: str = "",
+) -> str:
+    """Resolve a 03 series folder from the live helper index when available."""
+    resolver = getattr(uploader, "resolve_series_product_folder", None)
+    if not callable(resolver):
+        return str(requested_folder or "").strip()
+    result = resolver(machine, requested_folder=requested_folder)
+    return str((result or {}).get("path") or "").strip()
+
+
 def find_existing_machine_part(uploader: CaxaUploader, machine: str):
     """Return a unique existing 03 machine Part without needing its Product."""
     resolver = getattr(uploader, "existing_machine_part", None)
@@ -296,6 +309,7 @@ def refine_relations_from_tree(
         for code in (existing_original_codes or set())
         if drawing_bundle.normalize_code(code)
     }
+    relation_reader = getattr(uploader, "existing_relation_type", None)
     for rel in relations:
         parent = drawing_bundle.normalize_code(rel.get("parent_code"))
         child = drawing_bundle.normalize_code(rel.get("child_code"))
@@ -304,6 +318,29 @@ def refine_relations_from_tree(
         if child in existing_codes:
             rel["tree_exists"] = True
             rel["existing_original"] = True
+            actual_type = ""
+            if callable(relation_reader):
+                try:
+                    actual_type = relation_reader(parent, child)
+                except CaxaError as exc:
+                    log(
+                        "关系预检：无法读取 %s ← %s 的现有关系：%s"
+                        % (parent, child, exc)
+                    )
+            if actual_type in ("own", "borrow"):
+                rel["link_type"] = actual_type
+                rel["existing_relation"] = True
+                rel["existing_relation_type"] = actual_type
+                rel["auto_decided"] = True
+                log(
+                    "关系预检：%s ← %s 已有%s关系，保持现状"
+                    % (
+                        parent,
+                        child,
+                        "归属" if actual_type == "own" else "借用",
+                    )
+                )
+                continue
             if rel.get("link_type") != "borrow":
                 rel["link_type"] = "borrow"
                 log(
@@ -517,10 +554,13 @@ def apply_existing_original_rules(
     * configured relation -> upgrade first, then borrow to that position.
     """
     child_relations: dict[str, list[dict]] = {}
+    existing_relation_by_child: dict[str, dict] = {}
     for relation in relations:
         child = drawing_bundle.normalize_code(relation.get("child_code"))
         if child:
             child_relations.setdefault(child, []).append(relation)
+            if relation.get("existing_relation"):
+                existing_relation_by_child[child] = relation
 
     existing_codes = {
         drawing_bundle.normalize_code(code)
@@ -530,10 +570,13 @@ def apply_existing_original_rules(
     only_upgrade = 0
     borrow_after_upgrade = 0
     missing_positions = []
+    borrow_conversions = []
     for item in items:
         code = drawing_bundle.normalize_code(item.get("code"))
         if code not in existing_codes:
             item["existing_original"] = False
+            item.pop("existing_relation", None)
+            item.pop("existing_relation_type", None)
             item.pop("existing_original_part_id", None)
             item.pop("upgrade_only", None)
             continue
@@ -542,12 +585,23 @@ def apply_existing_original_rules(
             existing_parts.get(code, {}).get("object_id")
             or existing_parts.get(code, {}).get("part_id")
         )
+        existing_relation = existing_relation_by_child.get(code)
+        if existing_relation:
+            item["existing_relation"] = True
+            item["existing_relation_type"] = (
+                existing_relation.get("existing_relation_type") or "own"
+            )
+        else:
+            item.pop("existing_relation", None)
+            item.pop("existing_relation_type", None)
         if item.get("upgrade_only_user_set"):
             pass
         elif "upgrade_only" in item and not item.get("upgrade_only_defaulted"):
             item["upgrade_only_user_set"] = True
         else:
-            item["upgrade_only"] = code not in child_relations
+            item["upgrade_only"] = bool(
+                existing_relation or code not in child_relations
+            )
             item["upgrade_only_defaulted"] = True
         if item.get("upgrade_only"):
             only_upgrade += 1
@@ -556,10 +610,14 @@ def apply_existing_original_rules(
             missing_positions.append(code)
         else:
             borrow_after_upgrade += 1
+            if not existing_relation:
+                borrow_conversions.append(code)
     return {
         "existing_codes": existing_codes,
         "only_upgrade_count": only_upgrade,
         "borrow_after_upgrade_count": borrow_after_upgrade,
+        "existing_relation_codes": sorted(existing_relation_by_child),
+        "borrow_conversion_codes": borrow_conversions,
         "missing_borrow_positions": missing_positions,
     }
 
@@ -1149,6 +1207,11 @@ def upload_bundle(manifest: dict, account: dict, *, on_duplicate: str = "append_
                 requested_folder = (
                     str(target.get("series_product_folder") or "").strip()
                     or drawing_bundle.series_product_folder(machine_code)
+                )
+                requested_folder = resolve_series_product_folder(
+                    uploader,
+                    machine_code,
+                    requested_folder=requested_folder,
                 )
                 existing_part = find_existing_machine_part(
                     uploader, machine_code
@@ -2104,6 +2167,11 @@ def precheck_with_caxa(
                 str(target.get("series_product_folder") or "").strip()
                 or drawing_bundle.series_product_folder(machine_code)
             )
+            requested_folder = resolve_series_product_folder(
+                uploader,
+                machine_code,
+                requested_folder=requested_folder,
+            )
             existing_part = find_existing_machine_part(
                 uploader, machine_code
             )
@@ -2253,6 +2321,19 @@ def precheck_with_caxa(
                     "part_id": (part or {}).get("object_id"),
                 }
                 for code, part in sorted(existing_parts.items())
+            ],
+            "existing_relation_items": [
+                {
+                    "code": drawing_bundle.normalize_code(
+                        rel.get("child_code")
+                    ),
+                    "parent_code": drawing_bundle.normalize_code(
+                        rel.get("parent_code")
+                    ),
+                    "link_type": rel.get("link_type"),
+                }
+                for rel in relations
+                if rel.get("existing_relation")
             ],
             "duplicate_existing_parts": duplicate_parts,
             **{

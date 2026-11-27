@@ -1,7 +1,83 @@
 # 实现说明（图纸上传助手修复）
 
-日期：2026-11-05。实现模型：DeepSeek V4.1 Flash。验收方：Codex。
-工作目录：`E:\codex目录\2026-11-05\b\work\dsh_fix`；`app/` 为可修改副本，原始代码未改。
+初始日期：2026-11-05；当前更新：2026-11-26。
+实现模型：DeepSeek V4.1 Flash；验收方：Codex。
+工作目录：`E:\codex目录\2026-11-05\b\work\dsh_fix`；`app/` 为可修改副本，
+原始代码未改。
+
+## 2026-11-26 v1.2.5 整机 Part 优先查找
+
+- `upload_core.precheck_with_caxa()` 和实际写入前检查先调用
+  `find_existing_machine_part()`：
+  - `CaxaUploader.existing_machine_part()` 只按整机图号查询 Part；
+  - 唯一命中时直接使用 Part ID，跳过 Product、ProductFolder 和产品名称解析；
+  - 多个命中时以 `machine_part_duplicate` 阻止，不自动选择；
+  - 未命中时才进入 Product 解析分支。
+- 旧整机 Product 解析保留为缺失 Part 时的兼容路径：
+  - 先按 Product `IdentityNo` 查询；
+  - Product 不存在时按人工输入名称执行一次 `QueryProduct`；
+  - 同名候选必须用实际 ProductFolder 对象 ID 消歧；
+  - 只有目录内没有唯一候选时才创建 Product 和整机 Part。
+- 高级查询抓包证据与 SDK 实现：
+  - CAXA 客户端高级查询直接连接 SQL Server `1433/tcp`，核心条件是把
+    `T_Product.OBJ_ID = T_ProductPartLink.ROLEA_ID`、
+    `T_Part.OBJ_ID = T_ProductPartLink.ROLEB_ID`，并按
+    `T_Part.IdentityNo LIKE @P1` 过滤；该路径不经过 EAP `8900/tcp`。
+  - 生产代码不直连 SQL Server。`CmdFindProductByPart()` 使用已登录
+    `ObjectStore.NewQuery()` / `QueryCondition`，Product 侧角色为
+    `ProdWithTopAssembly`，Part 侧角色为 `TopAssemblyInProd`。
+  - `products_by_machine_part()` 调用 `find_product_by_part`，读取 Product
+    的对象 ID、`IdentityNo`、名称和描述。
+  - `product_folder_paths()` 调用 helper 获取 Product 的真实 ProductFolder
+    路径；helper 在会话内缓存完整 ProductFolder 映射，Python 端也按
+    Product ID 缓存查询结果。
+  - 高级关系查询成功时不再加载旧版约 1722 个 Product 的全量索引；失败时
+    才使用 Product `IdentityNo`、人工名称与实际目录进行兼容回退。
+- 已存在 Product 的实际目录和名称继续原样复用；预检结果只回填计划展示，
+  不按图号推断目录执行移动或重挂。
+- 已有原件的关系预检增加真实关系读取：
+  - `CaxaUploader.existing_relation_type()` 先查父/子 Part，再读取父件当前子关系；
+  - 已存在 `reference=False` 时保留 `own`，已存在 `reference=True` 时保留
+    `borrow`；
+  - `existing_relation=true` 的关系默认把对应图纸设为 `upgrade_only=true`，
+    `active_relations_for_upload()` 不再重写该关系；
+  - 当前父级下不存在同一条关系时，才按原有安全规则把已有原件的计划归属改为借用；
+  - Tk 树显示“已有归属关系/已有借用关系”，处理列显示“☑ 仅升版”。
+- helper 新增只读 `product_folder_index`：
+  - 首次调用递归读取 ProductFolder 树，建立对象 ID、名称、完整路径和
+    `path_parts`，同一 helper 会话后续调用直接复用；
+  - 系列索引只读取目录名称和子目录，不读取目录下的 Product；
+  - 原有 `product_folder_paths` 继续使用独立的 Product→Folder 路径索引；
+  - 登录、注销或切换会话时清空目录缓存；
+  - 目录名称后续若增加或修改，不需要改 Python 特例。
+- `CaxaUploader.load_series_folder_index()` 在预检会话内只取一次目录索引；
+  `resolve_series_product_folder()` 按图号字母段与实际目录名称匹配：
+  - 普通系列去掉数字后匹配，如 `HX21 → HX`、`HGB01 → HGB`；
+  - 支持 `LSYZ两室一站`、`GPZ钢瓶组`、`QT其他成品`；
+  - 顶层精确 `NS` 目录优先匹配 `03.NS.*`；`NS防爆箱` 是历史手动目标；
+  - `SFC防爆箱`、`SFD防爆箱` 分别独立匹配；
+  - `OM/OV/OW` 统一匹配 `OW系列`；
+  - 嵌套目录逐层匹配，例如 `HT合同特殊/HGB系列`。
+- `relations.match_series_product_folder()` 只按实际目录与图号字母别名计算；
+  同分多候选时不猜测，保持手动处理。预检和实际上传前检查都会使用解析后的
+  实际目录，并回填本地上传计划。
+- `03.W6.*` 不产生自动别名，界面显示“未指定系列”，由操作员手动设置
+  `W6` 和各级设计树目标。
+- 未连接 CAXA 时，界面仅用 `<字母>系列` 作为临时占位；预检返回实际
+  ProductFolder 后覆盖占位。
+- 层级树 `insert_root()` 先检查 `machine_targets`：
+  - `Z03.*` 等工艺文档先创建对应系列产品节点；
+  - 只作为借用关系父级出现的 `03.*` 整机也复用同一产品节点；
+  - 借用子件挂在整机节点下，避免同一个 `machine` 同时出现一个产品树节点和
+    一个额外的整机根节点。
+- `agent-mcp/` 与正式上传端保持隔离：
+  - 示例自带 v1.2.2 时代复制来的 `drawing_bundle.py` 和 `relations.py`，
+    用于离线备图和生成审核包；
+  - 设置 `CAXA_APP_DIR` 后，`server.py` 会把当前上传端 `app/` 放到模块搜索
+    路径首位，由 `runner.py` 加载 v1.2.5 的 `upload_core`、`upload_ui_logic`、
+    `config` 和 CAXA bridge；
+  - 当前版本的主路径兼容性已验证到只读预检，真实上传仍依赖客户端
+    elicitation、操作员确认和现场小批验收。
 
 ## 2026-11-21 上传、恢复与发布复审
 

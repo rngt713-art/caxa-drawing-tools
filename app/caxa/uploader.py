@@ -163,6 +163,7 @@ class CaxaUploader:
         self._product_index_errors: list[dict] = []
         self._product_root_parts: dict[int, list[dict]] = {}
         self._product_folder_paths_cache: dict[int, dict] = {}
+        self._series_folder_index_cache: dict | None = None
         self._part_cache: dict[str, dict] = {}
         self._machine_part_cache: dict[tuple[int, str], dict] = {}
         self._product_folder_links: set[tuple[int, str]] = set()
@@ -713,6 +714,87 @@ class CaxaUploader:
         }
         self._product_folder_paths_cache[product_id] = normalized
         return dict(normalized)
+
+    def load_series_folder_index(self, force: bool = False) -> dict:
+        """Load the fixed ProductFolder tree once for each helper session."""
+        if not force and self._series_folder_index_cache is not None:
+            return dict(self._series_folder_index_cache)
+        if self.bridge is None:
+            raise CaxaError(
+                "没有 CAXA 会话，无法读取系列产品目录",
+                stage="series_folder_index",
+            )
+        result = self.bridge.call({"cmd": "product_folder_index"})
+        if result.get("complete") is not True:
+            errors = list(result.get("errors") or [])
+            detail = "; ".join(
+                "%s: %s"
+                % (
+                    row.get("folder_path") or "未知目录",
+                    row.get("detail") or row.get("area") or "",
+                )
+                for row in errors[:20]
+                if isinstance(row, dict)
+            )
+            raise CaxaError(
+                "CAXA 系列产品目录读取不完整，不能安全自动匹配",
+                stage="series_folder_index",
+                detail=detail,
+            )
+        items = [
+            dict(row) for row in result.get("items") or []
+            if isinstance(row, dict)
+        ]
+        self._series_folder_index_cache = {
+            "items": items,
+            "complete": True,
+            "errors": [],
+        }
+        self.log("已读取 CAXA 系列产品目录：%d 项（会话内缓存）" % len(items))
+        return dict(self._series_folder_index_cache)
+
+    def resolve_series_product_folder(
+        self,
+        machine: str,
+        requested_folder: str = "",
+    ) -> dict:
+        """Resolve a machine series from the live ProductFolder index.
+
+        A user-entered path that differs from the local inferred fallback is
+        authoritative. Otherwise the helper index is matched by letter aliases.
+        """
+        machine = drawing_bundle.normalize_code(machine)
+        requested = self._normalize_product_folder_path(requested_folder)
+        fallback = relations.series_product_folder(machine)
+        manual = bool(
+            requested
+            and requested.casefold() not in {
+                fallback.casefold(),
+                "未指定系列".casefold(),
+            }
+        )
+        if manual:
+            return {
+                "path": requested,
+                "source": "manual",
+                "machine": machine,
+            }
+        index = self.load_series_folder_index()
+        matched = relations.match_series_product_folder(
+            machine, list(index.get("items") or [])
+        )
+        if matched is not None:
+            return {
+                **matched,
+                "path": str(matched.get("path") or ""),
+                "source": "caxa_index",
+                "machine": machine,
+            }
+        return {
+            "path": fallback,
+            "source": "fallback" if fallback else "manual_required",
+            "machine": machine,
+        }
 
     def products_by_machine_part(self, machine: str) -> list[dict]:
         """Use CAXA's ProductPartLink advanced query for an existing Part."""
@@ -1725,10 +1807,6 @@ class CaxaUploader:
         part carries ``link_failed`` so callers do not treat it as a normal
         success.
         """
-        product_folder = (
-            str(product_folder or "").strip()
-            or relations.series_product_folder(machine)
-        )
         existing_part = self.existing_machine_part(machine)
         if existing_part is not None:
             existing_part["created_new_part"] = False
@@ -1739,6 +1817,12 @@ class CaxaUploader:
             )
             return {}, existing_part
 
+        product_folder = (
+            self.resolve_series_product_folder(
+                machine,
+                requested_folder=str(product_folder or "").strip(),
+            ).get("path") or ""
+        )
         product_name = str(product_name or "").strip()
         if not product_name:
             raise MachineMissing(machine)
@@ -2215,6 +2299,23 @@ class CaxaUploader:
                 stage="part_info",
             )
         return False, None
+
+    def existing_relation_type(self, parent_code: str, child_code: str) -> str:
+        """Return the current direct relation type, or an empty/unknown marker."""
+        parent = self.find_part(parent_code)
+        child = self.find_part(child_code)
+        if parent is None or child is None:
+            return ""
+        parent_id = parent.get("object_id") or parent.get("part_id")
+        child_id = child.get("object_id") or child.get("part_id")
+        if not parent_id or not child_id:
+            return "unknown"
+        exists, reference = self._child_link_state(parent_id, child_id)
+        if not exists:
+            return ""
+        if reference is None:
+            return "unknown"
+        return "borrow" if reference else "own"
 
     def verify_relation_pairs(self, expected_relations: list[dict]) -> dict:
         """Verify all planned Part2Part edges after a batch of link writes.

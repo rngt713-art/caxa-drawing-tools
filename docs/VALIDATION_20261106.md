@@ -1,6 +1,95 @@
 # 验证记录（持续更新）
 
-当前核对日期：2026-11-24。
+当前核对日期：2026-11-26。
+
+## 2026-11-26 v1.2.6 本地测试候选
+
+用户确认：
+
+- `03.*` 整机已存在时，应直接复用整机 Part，不能继续依赖图号推断的系列目录。
+- 两台现场样例的真实归属均来自 CAXA 实际对象关系：
+  `03.HT.HGB05-05025B` 位于 `HT合同特殊/HGB系列`，
+  `03.HX21.E20H-03L` 位于 `HX系列`。
+- `agent-mcp/` 只作为外部 Agent 示例，不随后续上传端版本维护。
+
+实现与验证：
+
+- Part 优先主路径：
+  - 先按整机图号精确查询 Part；
+  - 唯一命中时只复用 Part，不再解析或重挂 Product；
+  - Part 不存在时才按人工产品名称查询 Product，唯一命中时复用，未命中才创建。
+- 已有原件关系补充现场反馈：
+  - 预检先读取父件当前子关系，不再仅凭“已有原件”强制改为借用；
+  - 当前已有归属关系时保留 `own`，显示“已有归属关系”，默认只升版；
+  - 当前已有借用关系时保留 `borrow`，显示“已有借用关系”，默认只升版；
+  - 只有当前父级下没有同一条关系时，才提示计划归属转为借用；
+  - 新增回归验证已有归属关系不会被改借、关系不会重复写入。
+- 用户提供一组只用于界面验证的文件，要求不得上传。验证后确认：
+  - 系列目录数量少且固定，预检登录后由 helper 一次读取并缓存实际
+    ProductFolder 树，再按目录名中的字母匹配图号；
+  - `LSYZ两室一站`、`GPZ钢瓶组`、`QT其他成品`、精确目录 `NS`、
+    `SFC防爆箱`、`SFD防爆箱` 分别自动匹配；`NS防爆箱` 保持历史手动目录；
+    `OM/OV/OW` 统一匹配 `OW系列`；
+  - `03.W6.*` 不自动解析，显示“未指定系列”，由操作员手动改为 `W6`；
+  - `Z03.HX21.E20H-03L` 与借用其组件的整机
+    `03.HX21.E20H-03L` 必须位于同一系列产品下；
+  - `04.13.HX21E20H-06 传动组件` 仅挂在整机 Part 下，不能形成额外整机根节点。
+- 已增加 helper 目录索引缓存回归、系列字母/嵌套路径匹配矩阵、W6 手动设置
+  回归和真实 Tk 层级树回归。测试集未连接上传流程，未向 CAXA 写入任何图纸、
+  Part、Product 或关系。
+- 使用临时编译的新 helper 完成一次只读目录读取：共 76 个 ProductFolder、
+  39 个顶层目录；`LSYZ`、`GPZ`、`QT`、`NS`、`SFC`、`SFD`、`OM/OV/OW`、
+  `HX21`、`HT/HGB` 均解析到实际目录，`W6` 保持手动。未读取 Product 内容，
+  未执行任何上传或关系写入。
+- 版本号已提升为 `1.2.6`，仅生成本地测试候选；尚未 commit、tag、push 或
+  创建 GitHub Release。
+- 抓包确认 CAXA 高级查询直接访问 SQL Server `1433/tcp`，通过
+  `T_Product.OBJ_ID = T_ProductPartLink.ROLEA_ID`、
+  `T_Part.OBJ_ID = T_ProductPartLink.ROLEB_ID` 和
+  `T_Part.IdentityNo LIKE @P1` 联表；不使用 EAP `8900/tcp`。
+- 工具没有复制该数据库访问方式，也不保存数据库凭据；helper 使用已登录 SDK
+  `find_product_by_part`，角色为 Product `ProdWithTopAssembly`、
+  Part `TopAssemblyInProd`。ProductFolder 实际路径由
+  `product_folder_paths` 读取并在 helper 会话内缓存。
+- 抓包原文、SQL 和两条现场样例的 Product/Part 映射记录在
+  `docs/BUSINESS_AND_CAXA_FINDINGS_20261106.md` §8。
+- 回归覆盖已有整机 Part 跳过 Product 查询、精确查询快速路径、Product 名称/目录
+  回填、重复 Part 阻止和缺失 Part 的新建分支。
+- 最终回归：246 个单元测试通过（2 个可选 PDF 依赖跳过）、19 个独立验收、
+  9 个边界验收、40 个 UI 验收和 2 个工艺 UI 验收；`compileall`、helper x86、
+  上传端 PyInstaller 重建和 8 秒启动冒烟通过。
+- v1.2.6 本地候选文件：
+  - version `1.2.6`
+  - helper source
+    `06880127b334ad6c6a269b80286a8189a6a92772e2587745cafe83e89df40f14`
+  - uploader
+    `41b78c7ac2cbaa33913436b46c243175f406b41a43e28e7008e25f102eb35485`
+  - helper
+    `c34ed1ee08c9d5419ac7b55aecb71f2cd9356eb75c05fdd57f94a843d2bf50aa`
+- `v1.2.6` 本地测试 ZIP：
+  `CAXA_Drawing_Product_Part_Lookup_v1.2.6_test_20261126.zip`，
+  ZIP SHA256
+  `6196ce1ce700ee6d483bd3646a8f78fb2217d74fd37949b084d5fe06bc04e29d`。
+  ZIP 完整性校验通过，包内上传端和 helper 哈希与发布目录一致。
+- PyInstaller 归档已确认内嵌 `caxa/caxa_helper/caxa_helper.exe`；
+  8 秒启动冒烟通过，测试进程已清理。
+- 旧的 v1.2.5 发布哈希和 ZIP 保留为历史记录，不作当前候选分发。
+
+MCP 示例专项：
+
+- 隔离环境为 Python `3.14.10`、`mcp 1.30.0`、`pypdf 7.1.1`。
+- stdio MCP 初始化成功并列出 `inspect_pdf`、`prepare_review_bundle`、
+  `preview_upload_plan`、`precheck_caxa_upload`、`test_chat_confirmation`、
+  `submit_reviewed_upload` 共 6 个工具。
+- 使用单页 PDF 实际通过 `inspect_pdf`、拆页和生成 `manifest.json`，
+  `preview_upload_plan` 正确返回图号、文件名、页数和审核摘要。
+- 使用本机配置执行只读 CAXA 预检，`01.21.01.V1-01` 返回 `ready=true`，
+  `existing_original=true`，未执行上传、重挂或流程写入。
+- 未设置 `CAXA_ENABLE_UPLOAD=1` 时，`submit_reviewed_upload` 正确返回阻止；
+  测试客户端未声明 elicitation，`test_chat_confirmation` 正确返回不支持。
+- 结论：该示例在 v1.2.5 及 v1.2.6 候选下可用于离线备图、聊天核对和只读预检；真实人工
+  确认表单及实际上传仍须在支持 elicitation 的客户端和工作机小批验收。
+  示例不进入正式维护路径，后续不兼容时在 `agent-mcp/README.md` 标记即可。
 
 ## 2026-11-24 上传端现场口径复核
 

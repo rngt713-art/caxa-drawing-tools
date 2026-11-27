@@ -1,10 +1,108 @@
-# HANDOFF — 图纸上传助手修复（dsh_fix）
+# HANDOFF — 图纸上传助手（v1.2.6 本地测试候选）
 
-更新时间：2026-11-06。状态：**完成（status=complete）**，已按 REVIEW_FEEDBACK.md 全部 23 项整改，并补充流程启动后的状态与图纸集合回读。
-实现模型：DeepSeek V4.1 Flash；验收方：Codex。
+更新时间：2026-11-26。状态：**v1.2.6 已编译为本地测试候选，未推送、
+未创建 tag/Release；尚待用户现场测试**。
 
 > 跨窗口继续工作前必须先读 `docs/BUSINESS_REQUIREMENTS.md`。用户确认的业务规则和
 > 刻意保留的高层→低层兼容回退不是待优化项。
+
+## 2026-11-26 v1.2.6 本地测试候选
+
+- 版本号已从 `v1.2.5` 提升为 `v1.2.6`，仅用于本地验收：
+  - `VERSION = 1.2.6`
+  - `app/version.py = 1.2.6`
+  - 尚未 commit、tag、push 或创建 GitHub Release。
+- helper 已由当前源码编译：
+  - source
+    `06880127b334ad6c6a269b80286a8189a6a92772e2587745cafe83e89df40f14`
+  - helper
+    `c34ed1ee08c9d5419ac7b55aecb71f2cd9356eb75c05fdd57f94a843d2bf50aa`
+- 上传端已用 PyInstaller 重建，并嵌入上述 helper：
+  - `release/图纸上传助手.exe`
+    `41b78c7ac2cbaa33913436b46c243175f406b41a43e28e7008e25f102eb35485`
+- 8 秒启动冒烟通过；启动时禁用自动更新检查，测试结束后已清理测试进程。
+- 本地测试包：
+  `outputs/CAXA_Drawing_Product_Part_Lookup_v1.2.6_test_20261126.zip`
+  - ZIP SHA256
+    `6196ce1ce700ee6d483bd3646a8f78fb2217d74fd37949b084d5fe06bc04e29d`
+  - ZIP 完整性校验通过，包内 EXE/helper 哈希与 `release/SHA256SUMS.txt`
+    一致。
+- 系列目录解析最终实现：
+  - 预检登录后 helper 读取一次 ProductFolder 树并在会话内缓存；
+  - 只读取目录名称和层级，不读取 Product 内容；
+  - 按图号字母与目录名中的拉丁字母匹配；
+  - `OM/OV/OW → OW系列`；
+  - `03.NS.*` 优先精确目录 `NS`；`NS防爆箱` 仅为历史手动目录；
+  - `SFC防爆箱`、`SFD防爆箱` 独立自动匹配；
+  - `W6` 不自动匹配，保持手动设置。
+- 已有原件关系已按 CAXA 现状修正：
+  - 预检先读取父件下实际子关系；
+  - 已有归属关系保留为归属，显示“已有归属关系”，默认只升版；
+  - 已有借用关系保留为借用，显示“已有借用关系”，默认只升版；
+  - 当前父级下没有同一条关系时，才将已有原件的计划归属转为借用。
+- 只读现场实测：76 个 ProductFolder、39 个顶层目录，上述样例均匹配预期；
+  `03.CFS.*` 无自动目录，交操作员手动设置。
+- 本轮测试：246 个单元测试、40 个 UI 验收、2 个工艺 UI 验收通过；
+  `compileall`、完整 helper 编译和上传端启动冒烟通过。
+
+## 2026-11-26 v1.2.5：整机 Part 优先与 MCP 示例核对
+
+- 本地提交和标签为 `9228f3c / v1.2.5`；已获取到远端 `origin/main`
+  对应提交 `407c0aa`。源码差异仅为换行符，
+  `git diff --ignore-space-at-eol HEAD origin/main` 为空；两个发布 EXE 的
+  Git blob 完全一致。
+- `03.*` 主路径最终收敛为：
+  - 如果整机 Part 已存在，只做一次精确 `query_parts` 并复用；
+    Product 名称、目录和归属全部跳过，不做推断或重挂；
+  - 如果整机 Part 不存在，产品名称变为人工必填；按输入名称执行一次
+    `QueryProduct` 快速查询，唯一命中时复用，未命中才创建 Product 和整机 Part。
+- 抓包确认 CAXA 高级查询由客户端直接向 SQL Server `1433/tcp` 发送
+  `T_Product + T_Part + T_ProductPartLink` 联表，不走 EAP `8900/tcp`。
+  helper 不保存数据库账号，改用已登录的 SDK `find_product_by_part`：
+  Product 角色 `ProdWithTopAssembly`、Part 角色 `TopAssemblyInProd`；
+  `product_folder_paths` 返回并缓存实际 ProductFolder 路径。
+- 层级树已修正两项现场测试反馈：
+  - 预检登录后通过 helper 一次读取并缓存实际 ProductFolder 树，按目录名中的
+    字母与图号字母段匹配；`LSYZ两室一站`、`GPZ钢瓶组`、`QT其他成品`、
+    精确目录 `NS`、`SFC防爆箱`、`SFD防爆箱` 不再依赖逐项硬编码；
+    `NS防爆箱` 属于历史手动目录；
+  - `OM/OV/OW` 统一解析到 `OW系列`，嵌套目录按路径逐级匹配；
+  - `03.W6.*` 不做自动映射，界面显示“未指定系列”，由操作员手动填写
+    `W6` 并设置各级设计树；
+  - 仅通过 `Z03.*` 工艺文档识别到的整机，与该整机作为借用父级的 `03.*`
+    节点归入同一 `产品目录 → 系列产品 → 整机 Part` 分支，借用子件位于整机下。
+  该测试集只做本地界面核对，没有执行 CAXA 上传。
+- 历史状态：v1.2.5 发布时上述 HX 映射和树分组修正尚未进入发布 EXE；
+  当前已由上方 v1.2.6 本地候选取代。
+- 现场四个已有整机只查询整机 Part，合计约 `0.25` 秒；不再走旧的 Product
+  索引和总装件扫描主路径。
+- 最终发布目录：
+  - `release/图纸上传助手.exe`
+    SHA256 `9b46d543c59c4b164ea1017bec998eef8d9c622d3e973639b7afad9cacc9490a`
+  - `release/caxa_helper.exe`
+    SHA256 `dbcea463d66247a056eb6d3a241e009f2604bf9fab638e1662c96c3bd4682b4b`
+- 旧的 `outputs/CAXA_Drawing_Product_Part_Lookup_20261126.zip`
+  仍包含上一版上传端 `91d0...`，不能作为 v1.2.5 最终包。已重新封装：
+  - `outputs/CAXA_Drawing_Product_Part_Lookup_v1.2.5_20261126.zip`
+  - ZIP SHA256
+    `008c173f2641cb46035909810acf4c9fbd6f1c8c78d43d5d57ed7ee75727a410`
+  - 包内上传端 `9b46...`、helper `dbce...`，ZIP 完整性校验通过。
+- 最终验证记录：245 个单元测试通过（2 个可选 PDF 依赖跳过）、19 个独立验收、
+  9 个边界验收、39 个 UI 验收和 2 个工艺 UI 验收；`compileall`、helper x86
+  编译、上传端 PyInstaller 重建和 8 秒启动冒烟通过。
+- `agent-mcp/` 是一次性示例，不随后续版本维护。2026-11-26 已在 `v1.2.5`
+  上验证：
+  - Python `3.14.10`、`mcp 1.30.0`、`pypdf 7.1.1` 下 stdio MCP 可启动并
+    列出 6 个工具；
+  - `inspect_pdf`、`prepare_review_bundle`、`preview_upload_plan` 实际调用
+    通过；
+  - 使用本机配置对 CAXA 做只读预检，`01.21.01.V1-01` 返回 `ready=true`，
+    识别为已有原件；
+  - 未启用上传时，`submit_reviewed_upload` 正确阻止；
+  - 当次测试客户端未声明 elicitation，`test_chat_confirmation` 正确返回
+    “不支持”。真实人工确认和实际上传仍需支持的客户端及工作机小批验收。
+- 本轮未执行真实 CAXA 上传、移动、重挂或流程写入。仓库工作区只有
+  `agent-mcp/requirements.txt` 的既有换行符修改，业务代码未因 MCP 核对而改动。
 
 ## 2026-11-23 v1.2.3：前端重构与构建链修复
 

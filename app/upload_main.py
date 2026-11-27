@@ -845,14 +845,34 @@ class UploadApp(TkinterDnD.Tk):
                             + "\n".join(missing_links[:20])
                         )
                     original_detail = ""
-                    if existing_originals:
+                    existing_relations = list(
+                        info.get("existing_relation_items") or []
+                    )
+                    borrow_conversions = list(
+                        info.get("borrow_conversion_codes") or []
+                    )
+                    if existing_relations:
                         original_detail = (
-                            "\n\n以下图号在 CAXA 中已有原件。"
-                            "预检已将计划归属改成借用，可在「借用处理」列调整：\n"
+                            "\n\n以下图号在 CAXA 中已有关系，"
+                            "预检将保留现有关系并只追加版次：\n"
                             + "\n".join(
-                                str(row.get("code") or "")
-                                for row in existing_originals[:20]
+                                "%s ← %s（已有%s关系）"
+                                % (
+                                    row.get("parent_code") or "",
+                                    row.get("code") or "",
+                                    "归属"
+                                    if row.get("link_type") == "own"
+                                    else "借用",
+                                )
+                                for row in existing_relations[:20]
                             )
+                        )
+                    if borrow_conversions:
+                        original_detail += (
+                            "\n\n以下图号在 CAXA 中已有原件，"
+                            "但当前父级下未确认到同一条关系；"
+                            "预检将计划归属改为借用，可在「借用处理」列调整：\n"
+                            + "\n".join(borrow_conversions[:20])
                         )
                     borrow_position_detail = ""
                     if missing_borrow_positions:
@@ -1956,25 +1976,40 @@ class UploadApp(TkinterDnD.Tk):
                 if relation is not None:
                     link_type = str(relation.get("link_type") or "borrow")
                     relation_label = LINK_TYPE_LABEL.get(link_type, link_type)
-                    if relation.get("existing_original"):
+                    if relation.get("existing_relation"):
+                        relation_label += (
+                            " [已有归属关系]"
+                            if link_type == "own"
+                            else " [已有借用关系]"
+                        )
+                    elif relation.get("existing_original"):
                         relation_label += " [已有原件→借用]"
                     if relation.get("manual_override"):
                         relation_label += " [人工]"
                 kind_text = KIND_LABEL.get(
                     item.get("kind"), item.get("kind", "")
                 )
-                if item.get("existing_original"):
+                if item.get("existing_relation"):
+                    kind_text += (
+                        "（已有归属关系）"
+                        if item.get("existing_relation_type") == "own"
+                        else "（已有借用关系）"
+                    )
+                elif item.get("existing_original"):
                     kind_text += "（已有原件）"
                 upgrade_only_text = ""
                 if (
                     item.get("existing_original")
                     and str(item.get("kind") or "") == "component"
                 ):
-                    upgrade_only_text = (
-                        "☑ 不借用"
-                        if item.get("upgrade_only")
-                        else "☐ 按计划借用"
-                    )
+                    if item.get("existing_relation") and item.get("upgrade_only"):
+                        upgrade_only_text = "☑ 仅升版"
+                    else:
+                        upgrade_only_text = (
+                            "☑ 不借用"
+                            if item.get("upgrade_only")
+                            else "☐ 按计划借用"
+                        )
                 values = (
                     item.get("source", ""),
                     item.get("page", ""),
@@ -1993,7 +2028,13 @@ class UploadApp(TkinterDnD.Tk):
                 relation_label = LINK_TYPE_LABEL.get(link_type, link_type)
                 if (relation or {}).get("manual_override"):
                     relation_label += " [人工]"
-                if (relation or {}).get("existing_original"):
+                if (relation or {}).get("existing_relation"):
+                    relation_label += (
+                        " [已有归属关系]"
+                        if link_type == "own"
+                        else " [已有借用关系]"
+                    )
+                elif (relation or {}).get("existing_original"):
                     relation_label += " [已有原件→借用]"
                 values = (
                     "设计树节点",
@@ -2036,7 +2077,7 @@ class UploadApp(TkinterDnD.Tk):
             if not code or code in rendered_codes:
                 return
             item = batch.get(code)
-            if item and str(item.get("kind") or "") == "machine_drawing":
+            if code in machine_targets:
                 product_iid = ensure_product_node(code)
                 insert_node(code, product_iid)
             elif item and str(item.get("kind") or "") == "process_doc":

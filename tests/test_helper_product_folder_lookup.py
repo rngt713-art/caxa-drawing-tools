@@ -339,6 +339,127 @@ class ProductIndexTest
 """
 
 
+_SERIES_FOLDER_INDEX_HARNESS = r"""
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+class IEAPProductEntity
+{
+    public int ObjectID;
+}
+
+class IEAPProductFolderEntity
+{
+    public int ObjectID;
+    public int ClassID;
+    public string IdentityNo;
+    public string Name;
+    public IEAPProductFolderEntity[] SubFolders;
+    public int ChildrenReads;
+    public int ProductReads;
+    public IEAPProductEntity[] RelatedProducts
+    {
+        get
+        {
+            ProductReads++;
+            return new IEAPProductEntity[0];
+        }
+    }
+    public IEAPProductFolderEntity[] Children
+    {
+        get
+        {
+            ChildrenReads++;
+            return SubFolders ?? new IEAPProductFolderEntity[0];
+        }
+    }
+}
+
+class MockService
+{
+    public bool HasLogin = true;
+    public IEAPProductFolderEntity[] Roots;
+    public IEAPProductFolderEntity[] GetAllRootProductFolders() { return Roots; }
+}
+
+class SeriesFolderIndexTest
+{
+    static readonly MockService _svc = new MockService();
+    static Dictionary<int, List<string>> _productFolderPathIndex;
+    static List<object> _productFolderPathErrors;
+    static List<object> _productFolderIndexRows;
+    static List<object> _productFolderIndexErrors;
+
+    static Dictionary<string, object> Ok(Dictionary<string, object> result)
+    {
+        result["ok"] = true;
+        return result;
+    }
+
+    static Dictionary<string, object> Err(string message)
+    {
+        return new Dictionary<string, object> { { "ok", false }, { "error", message } };
+    }
+
+    static void Require(bool value, string message)
+    {
+        if (!value) throw new Exception(message);
+    }
+
+    // HELPERS
+
+    static void Main()
+    {
+        var hgb = new IEAPProductFolderEntity {
+            ObjectID = 8, ClassID = 1013, Name = "HGB系列"
+        };
+        var ht = new IEAPProductFolderEntity {
+            ObjectID = 7, ClassID = 1013, Name = "HT合同特殊",
+            SubFolders = new [] { hgb }
+        };
+        _svc.Roots = new [] {
+            new IEAPProductFolderEntity {
+                ObjectID = 1, ClassID = 1013, Name = "LSYZ两室一站"
+            },
+            ht,
+            new IEAPProductFolderEntity {
+                ObjectID = 2, ClassID = 1013, Name = "OW系列"
+            },
+            new IEAPProductFolderEntity {
+                ObjectID = 3, ClassID = 1013, Name = "NS防爆箱"
+            },
+            new IEAPProductFolderEntity {
+                ObjectID = 4, ClassID = 1013, Name = "SFC防爆箱"
+            },
+            new IEAPProductFolderEntity {
+                ObjectID = 5, ClassID = 1013, Name = "SFD防爆箱"
+            }
+        };
+
+        var first = CmdProductFolderIndex();
+        var second = CmdProductFolderIndex();
+        Require((bool)first["ok"], "folder index must return");
+        Require((bool)first["complete"], "folder index must be complete");
+        Require(ht.ChildrenReads == 1, "folder tree is read once and cached");
+        Require(ht.ProductReads == 0, "series index must not scan Products");
+        var rows = (List<object>)second["items"];
+        Require(rows.Count == 7, "return every ProductFolder path");
+        var nested = rows
+            .Cast<Dictionary<string, object>>()
+            .Single(row => Convert.ToString(row["path"]) == "HT合同特殊/HGB系列");
+        var parts = (List<object>)nested["path_parts"];
+        Require(parts.Count == 2, "preserve nested path parts");
+        Require(
+            Convert.ToString(parts[0]) == "HT合同特殊" &&
+            Convert.ToString(parts[1]) == "HGB系列",
+            "nested path parts stay independent of display separators"
+        );
+    }
+}
+"""
+
+
 @unittest.skipUnless(os.name == "nt" and os.path.isfile(CSC), "Windows C# compiler required")
 class ProductFolderLookupTests(unittest.TestCase):
     def test_positive_read_versus_incomplete_or_confirmed_absence(self):
@@ -382,6 +503,34 @@ class ProductFolderLookupTests(unittest.TestCase):
             exe = source.with_suffix(".exe")
             source.write_text(
                 _PRODUCT_INDEX_HARNESS.replace("// HELPERS", methods),
+                encoding="utf-8-sig",
+            )
+            subprocess.run(
+                [CSC, "/nologo", "/platform:x86", "/out:" + str(exe), str(source)],
+                capture_output=True, text=True, encoding="mbcs", errors="replace",
+                check=True, timeout=30,
+            )
+            result = subprocess.run(
+                [str(exe)], capture_output=True, text=True,
+                encoding="mbcs", errors="replace", timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_series_folder_index_is_cached_in_helper_session(self):
+        helper = HELPER.read_text(encoding="utf-8")
+        methods = "\n\n".join(
+            _method(helper, signature) for signature in (
+                "    static Dictionary<string, object> CmdProductFolderIndex(",
+                "    static void EnsureSeriesFolderIndex(",
+                "    static void IndexSeriesFolder(",
+                "    static string NormalizeProductFolderPath(",
+            )
+        )
+        with support.temp_dir(prefix="series_folder_index_") as folder:
+            source = Path(folder) / "SeriesFolderIndex.cs"
+            exe = source.with_suffix(".exe")
+            source.write_text(
+                _SERIES_FOLDER_INDEX_HARNESS.replace("// HELPERS", methods),
                 encoding="utf-8-sig",
             )
             subprocess.run(

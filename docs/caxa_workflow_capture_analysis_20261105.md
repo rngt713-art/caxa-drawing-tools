@@ -1,5 +1,10 @@
 # CAXA 升版、上传与流程发起抓包分析
 
+> 范围说明：本文只记录升版、文件上传和流程发起的 EAP RPC，目标端口为
+> `8900/tcp`。CAXA 客户端“高级查询”是另一条路径，抓包确认它直接访问
+> SQL Server `1433/tcp`；本工具仍通过 EAP SDK 执行等价查询，不直连数据库。
+> 详见 `docs/BUSINESS_AND_CAXA_FINDINGS_20261106.md` §8。
+
 ## 时间范围
 
 - 抓包文件：`caxa_wf_capture_20261105.pcapng`

@@ -1,6 +1,6 @@
 # CAXA 图纸工具业务与真机发现
 
-更新时间：2026-11-09
+更新时间：2026-11-26
 
 本文用于说明当前业务目标、已经实现的操作规则、真实 CAXA 小批上传结果
 和仍需确认的事项。
@@ -57,7 +57,9 @@
 ### 2.4 03 整机与系列产品
 
 - 03 整机不在普通通用件 Part 树中，而在各自系列 Product 下。
-- Product 的产品代号通常等于 03 整机图号，名称是业务系列名称。
+- 历史描述“Product 的产品代号通常等于 03 整机图号”不能作为查找依据；
+  2026-11-26 现场数据已确认 Product `IdentityNo` 可能只是整机图号前缀或沿用
+  其他历史值。当前匹配规则见 §8。
 - 一批图纸可以包含多台 03 整机。上传端按系列产品目录分组，
   同一目录下的多台 03 整机作为该目录子级，并在每台 03 行单独编辑产品名称。
 - 新建 Product 必须挂到对应系列产品目录：
@@ -280,4 +282,69 @@ helper 还会精确识别 CAXA 的“同一个用户已经登陆”提示框：�
 - `app/caxa/uploader.py`：Product/Part 建立、归属与借用、结果回读。
 - `app/caxa/caxa_helper/caxa_helper.cs`：EAP 创建/链接、流程、导入框自动确定。
 - `app/upload_main.py`：层级树、拖动、系列产品必填、手工次级条目。
+
+## 8. 2026-11-26 高级查询抓包与 ProductPartLink 反查
+
+CAXA 客户端“高级查询”抓包确认：查询直接发送到 SQL Server `1433/tcp`，
+不经过原来的 EAP RPC `8900/tcp`。捕获到的核心联表条件为：
+
+```sql
+SELECT DISTINCT a.*
+FROM T_Product a, T_Part b_1, T_ProductPartLink c_1
+WHERE a.OBJ_ID=c_1.ROLEA_ID
+  AND b_1.OBJ_ID=c_1.ROLEB_ID
+  AND b_1.IdentityNo LIKE @P1
+```
+
+这是 CAXA 客户端内部的高级查询实现证据，不是本工具可使用的新接口。
+生产工具不得直接连接 SQL Server，也不得保存或要求用户填写数据库账号；
+继续复用已登录的 CAXA EAP SDK 完成同样的对象关系查询。
+
+当前 SDK 查询路径：
+
+1. `query_parts` 先精确确认整机 Part。
+2. helper 命令 `find_product_by_part` 通过
+   `ObjectStore.NewQuery()` + `QueryCondition` 反查 Product。
+3. `ProductPartLink` 两侧角色固定为：
+   - Product 侧 `ProdWithTopAssembly`；
+   - Part 侧 `TopAssemblyInProd`。
+4. Python 端 `products_by_machine_part()` 接收 Product 的对象 ID、图号和名称。
+5. `product_folder_paths()` 返回该 Product 的真实 ProductFolder 路径；
+   helper 在单个会话内缓存完整 ProductFolder 映射，避免每个整机重复遍历。
+6. `find_product_for_machine()` 采用 Part 优先路径。高级关系查询成功时，
+   不再加载旧版约 1722 个 Product 的全产品索引；查询失败时才走精确查询和
+   名称/目录兼容回退。
+
+现场已验证的 Product/Part 关系包括：
+
+- `03.HT.HGB05-05025B` Part `44135` → Product
+  `687 / 03.HT.HGB05-05025` → `HT合同特殊/HGB系列`。
+- `03.HX21.E20H-03L` Part `44510` → Product
+  `1377 / 03.HX21.E20H-01` → `HX系列`。
+
+因此不能把 Product `IdentityNo` 与整机 Part `IdentityNo` 做简单等值匹配，
+也不能根据图号推断 `HX21系列`、`HGB系列` 等目录；必须读取实际
+`ProductPartLink` 和 ProductFolder 路径。
+
+## 9. 2026-11-26 ProductFolder 系列索引
+
+现场确认系列 ProductFolder 数量固定、变化极少，可由 helper 在预检会话中
+读取一次并缓存，不需要继续维护逐项图号映射规则。
+
+- helper 命令 `product_folder_index` 返回每个目录的对象 ID、名称、完整路径、
+  路径层级和 `path_parts`。
+- Python 按图号中的字母段与目录名中的拉丁字母匹配：
+  - `LSYZ两室一站` → `03.LSYZ.*`；
+  - `GPZ钢瓶组` → `03.GPZ.*`；
+  - `QT其他成品` → `03.QT.*`；
+  - 顶层精确 `NS` 目录匹配 `03.NS.*`；
+  - `SFC防爆箱`、`SFD防爆箱` 是独立目录；
+  - `NS防爆箱` 是历史遗留目录，不做自动匹配；需要放入其中的图纸由操作员手动
+    修改；
+  - `HT合同特殊/HGB系列` 通过两级路径匹配 `03.HT.HGB01-*`。
+- `OM/OV/OW` 全部映射到 `OW系列`。
+- `W6` 是设计图纸区域，不参与整机系列自动匹配；出现时保留“未指定系列”，
+  由操作员手工设置。
+- 该索引只在当前 helper 会话内缓存。新增或修改目录后重启 helper 即可重读，
+  不需要改代码。
 

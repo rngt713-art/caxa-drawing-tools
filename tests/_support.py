@@ -156,6 +156,8 @@ class FakeBridge:
             return {"ok": True, "drawings": []}
         if name == "part_info":
             return {"ok": True, "children": [], "link_endpoints": []}
+        if name == "product_folder_index":
+            return {"ok": True, "items": [], "complete": True, "errors": []}
         return {"ok": True}
 
 

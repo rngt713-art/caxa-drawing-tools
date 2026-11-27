@@ -12,8 +12,9 @@ Business rules implemented here (confirmed by the user, 2026-11-05):
 * ``relations`` is the only executable source.  ``assemblies``,
   ``manual_borrows`` and ``item.parent_code`` are legacy inputs migrated once
   on import; afterwards a deleted relation stays deleted.
-* Product folders are derived from the ``03.<series>.*`` code; the HT special
-  hierarchy is handled here as well.
+* Product folders prefer the live ProductFolder index loaded during pre-check.
+  Folder names are matched by their Latin-letter aliases; the static fallback
+  is only for building the local plan before a CAXA session exists.
 
 This module deliberately has no dependency on the rest of the application so it
 can be imported from the CAXA layer without cycles.  Callers that need code
@@ -37,6 +38,8 @@ MIGRATION_VERSION = 1
 MIGRATED_CHILDREN_FLAG = "relations_migrated_children"
 AUTO_PREFIX_FLAG = "relations_auto_prefix_v1"
 _GENERAL_SERIES_RE = re.compile(r"^01\.([A-Z0-9]+)(?:[.\-]|$)")
+_SERIES_ALIAS_GROUPS = {"OM": "OW", "OV": "OW", "OW": "OW"}
+_LATIN_RUN_RE = re.compile(r"[A-Z]+")
 
 
 def normalize_code(value: str) -> str:
@@ -100,20 +103,137 @@ def series_product_folder(machine_code: str) -> str:
     """Return the CAXA product-folder path for a ``03.<series>.*`` code.
 
     ``03.HT.HGB.*`` is nested under ``HT合同特殊/HGB系列``.  Other
-    ``03.HT.*`` products live directly under ``HT合同特殊``.
+    ``03.HT.*`` products live directly under ``HT合同特殊``.  Ordinary
+    series folder names contain letters only, so model digits are removed
+    from tokens such as ``HX21`` and ``HGB01``.  ``W6`` is a design-drawing
+    tree, not an automatically inferred machine-product folder.
     """
     machine = normalize_code(machine_code)
     match = re.match(r"^03\.([A-Z0-9]+)(?:[.\-]|$)", machine)
     if not match:
         return ""
     series = match.group(1)
-    if series == "HT":
+    if series == "W6":
+        return ""
+    series_code = re.sub(r"\d+", "", series)
+    if not series_code:
+        return ""
+    series_code = _SERIES_ALIAS_GROUPS.get(series_code, series_code)
+    if series_code == "HT":
         if machine.startswith("03.HT.HGB"):
             return "HT合同特殊/HGB系列"
         return "HT合同特殊"
-    if series == "GPZ":
+    if series_code == "GPZ":
         return "GPZ钢瓶组"
-    return "%s系列" % series
+    return "%s系列" % series_code
+
+
+def machine_series_aliases(machine_code: str) -> list[str]:
+    """Return ordered Latin aliases used to match an actual ProductFolder.
+
+    Numeric model suffixes are ignored, so ``HX21`` contributes ``HX`` and
+    ``HGB01`` contributes ``HGB``. ``OM/OV/OW`` are the explicitly confirmed
+    equivalent group stored in the ``OW系列`` folder. ``W6`` is a design-tree
+    exception and intentionally produces no automatic aliases.
+    """
+    machine = normalize_code(machine_code)
+    match = re.match(r"^03\.(.+)$", machine)
+    if not match:
+        return []
+    parts = [
+        part for part in re.split(r"[.\-]", match.group(1))
+        if part
+    ]
+    if parts and parts[0] == "W6":
+        return []
+    aliases = []
+    for index, part in enumerate(parts):
+        letters = "".join(_LATIN_RUN_RE.findall(part))
+        if len(letters) < 2:
+            continue
+        if index == 0:
+            letters = _SERIES_ALIAS_GROUPS.get(letters, letters)
+        if letters not in aliases:
+            aliases.append(letters)
+    return aliases
+
+
+def _folder_name_aliases(value: str) -> list[str]:
+    aliases = []
+    for letters in _LATIN_RUN_RE.findall(normalize_code(value)):
+        if len(letters) >= 2 and letters not in aliases:
+            aliases.append(letters)
+    return aliases
+
+
+def match_series_product_folder(
+    machine_code: str,
+    folders: list[dict],
+) -> dict | None:
+    """Match one actual ProductFolder path by its Latin-letter aliases.
+
+    The first code alias must occur in the first path level. Deeper path levels
+    must consume later aliases in order, so ``HT + HGB`` can select
+    ``HT合同特殊/HGB系列`` without matching unrelated sibling folders.
+    Ambiguous equal-score matches return ``None`` and remain manual.
+    """
+    code_aliases = machine_series_aliases(machine_code)
+    if not code_aliases:
+        return None
+    matches = []
+    for row in folders or []:
+        if not isinstance(row, dict):
+            continue
+        parts = row.get("path_parts")
+        if not isinstance(parts, (list, tuple)) or not parts:
+            parts = [
+                part.strip()
+                for part in str(row.get("path") or "").replace("\\", "/").split("/")
+                if part.strip()
+            ]
+        if not parts:
+            continue
+        first_aliases = _folder_name_aliases(str(parts[0]))
+        if code_aliases[0] not in first_aliases:
+            continue
+        cursor = 1
+        matched = 1
+        valid = True
+        for part in parts[1:]:
+            aliases = _folder_name_aliases(str(part))
+            found = next(
+                (
+                    index for index in range(cursor, len(code_aliases))
+                    if code_aliases[index] in aliases
+                ),
+                None,
+            )
+            if found is None:
+                valid = False
+                break
+            cursor = found + 1
+            matched += 1
+        if valid:
+            result = dict(row)
+            result["matched_aliases"] = code_aliases[:cursor]
+            exact_name = int(
+                normalize_code(row.get("name")).strip()
+                == code_aliases[0]
+            )
+            matches.append((matched, exact_name, result))
+    if not matches:
+        return None
+    best_score = max(
+        (matched, exact_name)
+        for matched, exact_name, _row in matches
+    )
+    best = [
+        row for matched, exact_name, row in matches
+        if (matched, exact_name) == best_score
+    ]
+    if len(best) != 1:
+        return None
+    return best[0]
 
 
 def prefix_parent_candidates(child_code: str) -> list[str]:

@@ -10,11 +10,23 @@ import upload_core
 
 
 class FakeTree:
-    def __init__(self, existing):
+    def __init__(self, existing, relation_types=None):
         self.existing = {code.upper() for code in existing}
+        self.relation_types = {
+            (str(parent).upper(), str(child).upper()): link_type
+            for (parent, child), link_type in (relation_types or {}).items()
+        }
 
     def find_part(self, code):
-        return {"object_id": 1} if str(code).upper() in self.existing else None
+        return {
+            "object_id": abs(hash(str(code).upper())) % 100000 + 1
+        } if str(code).upper() in self.existing else None
+
+    def existing_relation_type(self, parent, child):
+        return self.relation_types.get(
+            (str(parent).upper(), str(child).upper()),
+            "",
+        )
 
 
 def pairs(manifest):
@@ -244,6 +256,101 @@ class TreeDecisionTests(unittest.TestCase):
             relations.series_product_folder("03.GPZ.L34040-T01"),
             "GPZ钢瓶组",
         )
+        self.assertEqual(
+            relations.series_product_folder("03.HX21.E20H-03L"),
+            "HX系列",
+        )
+        self.assertEqual(
+            relations.series_product_folder("03.HGB01-06350G"),
+            "HGB系列",
+        )
+        self.assertEqual(
+            relations.series_product_folder("03.HW21.001"),
+            "HW系列",
+        )
+        self.assertEqual(
+            relations.series_product_folder("03.HE300.001"),
+            "HE系列",
+        )
+        self.assertEqual(
+            relations.series_product_folder("03.GPZ1.L34040-T01"),
+            "GPZ钢瓶组",
+        )
+        for code in ("03.OM.001", "03.OV.001", "03.OW.001"):
+            self.assertEqual(
+                relations.series_product_folder(code),
+                "OW系列",
+            )
+        self.assertEqual(
+            relations.series_product_folder("03.W6.001"),
+            "",
+        )
+
+    def test_live_series_folder_alias_matching(self):
+        folders = [
+            {
+                "path": "LSYZ两室一站",
+                "path_parts": ["LSYZ两室一站"],
+            },
+            {
+                "path": "GPZ钢瓶组",
+                "path_parts": ["GPZ钢瓶组"],
+            },
+            {
+                "path": "QT其他成品",
+                "path_parts": ["QT其他成品"],
+            },
+            {
+                "name": "NS",
+                "path": "NS",
+                "path_parts": ["NS"],
+            },
+            {
+                "name": "NS防爆箱",
+                "path": "NS防爆箱",
+                "path_parts": ["NS防爆箱"],
+            },
+            {
+                "path": "SFC防爆箱",
+                "path_parts": ["SFC防爆箱"],
+            },
+            {
+                "path": "SFD防爆箱",
+                "path_parts": ["SFD防爆箱"],
+            },
+            {
+                "path": "OW系列",
+                "path_parts": ["OW系列"],
+            },
+            {
+                "path": "HT合同特殊",
+                "path_parts": ["HT合同特殊"],
+            },
+            {
+                "path": "HT合同特殊/HGB系列",
+                "path_parts": ["HT合同特殊", "HGB系列"],
+            },
+        ]
+
+        def matched(code):
+            row = relations.match_series_product_folder(code, folders)
+            return row["path"] if row else ""
+
+        self.assertEqual(matched("03.LSYZ.001"), "LSYZ两室一站")
+        self.assertEqual(matched("03.GPZ.L34040-T01"), "GPZ钢瓶组")
+        self.assertEqual(matched("03.QT.001"), "QT其他成品")
+        self.assertEqual(matched("03.NS.13.ETB20-01"), "NS")
+        self.assertEqual(matched("03.SFC.001"), "SFC防爆箱")
+        self.assertEqual(matched("03.SFD.001"), "SFD防爆箱")
+        self.assertEqual(matched("03.CFS.2NG-01"), "")
+        self.assertEqual(matched("03.OM.001"), "OW系列")
+        self.assertEqual(matched("03.OV.001"), "OW系列")
+        self.assertEqual(matched("03.OW.001"), "OW系列")
+        self.assertEqual(
+            matched("03.HT.HGB01-06350G"),
+            "HT合同特殊/HGB系列",
+        )
+        self.assertEqual(matched("03.W6.001"), "")
 
     def test_same_01_series_is_own_without_textual_prefix(self):
         tree = FakeTree([])
@@ -311,6 +418,43 @@ class TreeDecisionTests(unittest.TestCase):
             FakeTree([]), rels, log=lambda *a: None
         )
         self.assertEqual(rels[0]["link_type"], "own")
+
+    def test_existing_own_relation_is_preserved_and_only_upgraded(self):
+        parent = "01.21.01.V1-01"
+        child = "01.21.01.V1-01-07"
+        tree = FakeTree(
+            [parent, child],
+            relation_types={(parent, child): "own"},
+        )
+        items = [
+            {"code": parent, "kind": "component"},
+            {"code": child, "kind": "component"},
+        ]
+        rels = [{"parent_code": parent, "child_code": child}]
+        upload_core.refine_relations_from_tree(
+            tree,
+            rels,
+            existing_original_codes={parent, child},
+            log=lambda *_args: None,
+        )
+        rules = upload_core.apply_existing_original_rules(
+            items,
+            rels,
+            {
+                parent: {"object_id": 11},
+                child: {"object_id": 12},
+            },
+        )
+        self.assertEqual(rels[0]["link_type"], "own")
+        self.assertTrue(rels[0]["existing_relation"])
+        self.assertTrue(items[1]["existing_relation"])
+        self.assertEqual(items[1]["existing_relation_type"], "own")
+        self.assertTrue(items[1]["upgrade_only"])
+        self.assertEqual(rules["borrow_conversion_codes"], [])
+        self.assertEqual(
+            upload_core.active_relations_for_upload(items, rels),
+            [],
+        )
         # The code-prefix owner is stable regardless of whether the part exists.
         upload_core.refine_relations_from_tree(
             FakeTree(["01.02"]), rels, log=lambda *a: None
